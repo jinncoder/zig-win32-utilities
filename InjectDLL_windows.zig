@@ -169,7 +169,7 @@ const Action = struct {
     }
 
     pub fn parseDLL(self: *Self, line: []u8) !void {
-        self.dll = try std.fmt.allocPrintZ(self.allocator, "{s}", .{line});
+        self.dll = try std.fmt.allocPrintSentinel(self.allocator, "{s}", .{line}, 0);
         errdefer self.allocator.free(self.dll);
     }
 

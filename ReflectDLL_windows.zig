@@ -361,18 +361,18 @@ const Action = struct {
             self.file_type = FILE_TYPE.TCP;
 
             var iter = std.mem.splitAny(u8, line[6..], ":");
-            self.ip = try std.fmt.allocPrintZ(self.allocator, "{s}", .{iter.next().?});
+            self.ip = try std.fmt.allocPrintSentinel(self.allocator, "{s}", .{iter.next().?}, 0);
             errdefer self.allocator.free(self.ip);
             self.port = std.fmt.parseInt(u16, iter.next().?, 10) catch 55555;
 
-            self.dll = try std.fmt.allocPrintZ(self.allocator, "{s}", .{""});
+            self.dll = try std.fmt.allocPrintSentinel(self.allocator, "{s}", .{""}, 0);
             errdefer self.allocator.free(self.dll);
         } else {
-            self.ip = try std.fmt.allocPrintZ(self.allocator, "{s}", .{""});
+            self.ip = try std.fmt.allocPrintSentinel(self.allocator, "{s}", .{""}, 0);
             errdefer self.allocator.free(self.ip);
             self.port = 0;
 
-            self.dll = try std.fmt.allocPrintZ(self.allocator, "{s}", .{line});
+            self.dll = try std.fmt.allocPrintSentinel(self.allocator, "{s}", .{line}, 0);
             errdefer self.allocator.free(self.dll);
         }
     }

@@ -152,19 +152,19 @@ const Action = struct {
     }
 
     pub fn parseSource(self: *Self, line: []u8) !void {
-        self.source = std.fmt.allocPrintZ(self.allocator, "{s}", .{line}) catch "";
+        self.source = std.fmt.allocPrintSentinel(self.allocator, "{s}", .{line}, 0) catch "";
     }
 
     pub fn parseDestination(self: *Self, line: []u8) !void {
-        self.destination = std.fmt.allocPrintZ(self.allocator, "{s}", .{line}) catch "";
+        self.destination = std.fmt.allocPrintSentinel(self.allocator, "{s}", .{line}, 0) catch "";
     }
 
     pub fn parseWorkingDirectory(self: *Self, line: []u8) !void {
-        self.workingDirectory = std.fmt.allocPrintZ(self.allocator, "{s}", .{line}) catch "";
+        self.workingDirectory = std.fmt.allocPrintSentinel(self.allocator, "{s}", .{line}, 0) catch "";
     }
 
     pub fn parseArguments(self: *Self, line: []u8) !void {
-        self.arguments = std.fmt.allocPrintZ(self.allocator, "{s}", .{line}) catch "";
+        self.arguments = std.fmt.allocPrintSentinel(self.allocator, "{s}", .{line}, 0) catch "";
     }
 
     pub fn deinit(self: *Self) void {

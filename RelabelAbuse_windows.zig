@@ -164,7 +164,7 @@ const Action = struct {
         ea.?.grfInheritance = win32.NO_INHERITANCE;
         ea.?.Trustee.TrusteeForm = win32.TRUSTEE_IS_SID;
         ea.?.Trustee.TrusteeType = win32.TRUSTEE_IS_USER;
-        ea.?.Trustee.ptstrName = @alignCast(@ptrCast(pSid.?.*));
+        ea.?.Trustee.ptstrName = @ptrCast(@alignCast(pSid.?.*));
 
         // https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-setentriesinaclw
         var ret = win32.SetEntriesInAclW(
@@ -383,7 +383,7 @@ const Action = struct {
     }
 
     pub fn parseUsername(self: *Self, line: []u8) !void {
-        self.lpAccountName = try std.fmt.allocPrintZ(self.allocator, "{s}", .{line});
+        self.lpAccountName = try std.fmt.allocPrintSentinel(self.allocator, "{s}", .{line}, 0);
         errdefer self.allocator.free(self.lpAccountName);
     }
 

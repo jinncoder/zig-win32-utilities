@@ -82,7 +82,7 @@ const Action = struct {
     }
 
     pub fn parseSource(self: *Self, line: []u8) !void {
-        self.source = std.fmt.allocPrintZ(self.allocator, "{s}", .{line}) catch "";
+        self.source = std.fmt.allocPrintSentinel(self.allocator, "{s}", .{line}, 0) catch "";
     }
 
     pub fn deinit(self: *Self) void {

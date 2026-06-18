@@ -167,7 +167,7 @@ const Action = struct {
 
         const powershell = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\PowerShell.exe";
 
-        const commandLine = try std.fmt.allocPrintZ(self.allocator, "{s} -Command \"{s}\"", .{ powershell, self.command });
+        const commandLine = try std.fmt.allocPrintSentinel(self.allocator, "{s} -Command \"{s}\"", .{ powershell, self.command }, 0);
         defer self.allocator.free(commandLine);
 
         const lpCommandLine = std.unicode.utf8ToUtf16LeAllocZ(self.allocator, commandLine) catch undefined;
@@ -266,7 +266,7 @@ const Action = struct {
     }
 
     pub fn parseCommand(self: *Self, line: []u8) !void {
-        self.command = try std.fmt.allocPrintZ(self.allocator, "{s}", .{line});
+        self.command = try std.fmt.allocPrintSentinel(self.allocator, "{s}", .{line}, 0);
         errdefer self.allocator.free(self.command);
     }
 

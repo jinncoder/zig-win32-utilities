@@ -43,7 +43,7 @@ const Action = struct {
     }
 
     pub fn parseOutfile(self: *Self, line: []u8) !void {
-        self.lpOutFile = try std.fmt.allocPrintZ(self.allocator, "{s}", .{line});
+        self.lpOutFile = try std.fmt.allocPrintSentinel(self.allocator, "{s}", .{line}, 0);
         errdefer self.allocator.free(self.lpOutFile);
     }
 

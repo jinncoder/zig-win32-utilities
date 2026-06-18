@@ -124,7 +124,7 @@ const Action = struct {
         tp.Privileges[0].Attributes = win32.SE_PRIVILEGE_ENABLED;
         var success: bool = true;
 
-        const lpName = std.fmt.allocPrintZ(allocator, "{s}", .{privilege}) catch return false;
+        const lpName = std.fmt.allocPrintSentinel(allocator, "{s}", .{privilege}, 0) catch return false;
         std.log.debug("[+] Attempting to enable {s}\n", .{lpName});
 
         defer allocator.free(lpName);

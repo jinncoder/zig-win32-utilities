@@ -105,7 +105,7 @@ const Action = struct {
                 continue;
             }
 
-            const lpName = std.fmt.allocPrintZ(self.allocator, "{s}", .{privilege}) catch return;
+            const lpName = std.fmt.allocPrintSentinel(self.allocator, "{s}", .{privilege}, 0) catch return;
             defer self.allocator.free(lpName);
 
             // https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-lookupprivilegevaluea

