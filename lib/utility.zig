@@ -16,13 +16,6 @@ const win32 = @import("win32").everything;
 const win32_security = @import("win32").security;
 const windows = std.os.windows;
 
-// This exists until zigwin32 is updated to enable bitmasks for DesiredAccess /-:
-extern "advapi32" fn OpenProcessToken(
-    ProcessHandle: ?win32.HANDLE,
-    DesiredAccess: win32_security.TOKEN_ACCESS_MASK,
-    TokenHandle: ?*?win32.HANDLE,
-) callconv(std.os.windows.WINAPI) win32.BOOL;
-
 const OwnedSid = struct {
     bytes: []u8,
 
@@ -43,7 +36,7 @@ pub fn closeHandle(handle: ?win32.HANDLE) void {
 }
 
 pub fn miniDumpPID(allocator: std.mem.Allocator, pid: u32, outfile: []u8) !void {
-    const lpFileName = try std.fmt.allocPrintZ(allocator, "{s}", .{outfile});
+    const lpFileName = try std.fmt.allocPrintSentinel(allocator, "{s}", .{outfile}, 0);
     errdefer allocator.free(lpFileName);
 
     const outFileH: ?win32.HANDLE = win32.CreateFileA(
@@ -76,7 +69,7 @@ pub fn miniDumpPID(allocator: std.mem.Allocator, pid: u32, outfile: []u8) !void 
     defer _ = closeHandle(hProcess);
 
     // https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocesstoken
-    if (0 == OpenProcessToken(
+    if (0 == win32.OpenProcessToken(
         hProcess,
         win32_security.TOKEN_ADJUST_PRIVILEGES,
         &tokenH,
@@ -94,7 +87,7 @@ pub fn miniDumpPID(allocator: std.mem.Allocator, pid: u32, outfile: []u8) !void 
     }
 
     // https://learn.microsoft.com/en-us/windows/win32/api/minidumpapiset/nf-minidumpapiset-minidumpwritedump
-    if (std.os.windows.FALSE == win32.MiniDumpWriteDump(
+    if (win32.FALSE == win32.MiniDumpWriteDump(
         processH,
         pid,
         outFileH,

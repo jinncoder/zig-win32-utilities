@@ -42,13 +42,13 @@ const Action = struct {
         std.log.info("\n", .{});
     }
 
-    pub fn parseOutfile(self: *Self, line: []u8) !void {
+    pub fn parseOutfile(self: *Self, line: [:0]const u8) !void {
         self.lpOutFile = try std.fmt.allocPrintSentinel(self.allocator, "{s}", .{line}, 0);
         errdefer self.allocator.free(self.lpOutFile);
     }
 
-    pub fn parsePID(self: *Self, line: []u8) !void {
-        self.targetPID = std.fmt.parseInt(u32, line, 10) catch undefined;
+    pub fn parsePID(self: *Self, line: [:0]const u8) !void {
+        self.targetPID = try std.fmt.parseInt(u32, line, 10);
     }
 
     pub fn deinit(self: *Self) void {
@@ -56,10 +56,12 @@ const Action = struct {
     }
 };
 
-pub fn usage(argv: []u8) !void {
-    const stdout = std.io.getStdOut().writer();
-
-    try stdout.print(
+pub fn usage(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    argv: [:0]const u8,
+) !void {
+    const buffer: []u8 = try std.fmt.allocPrint(allocator,
         \\
         \\Example:
         \\
@@ -71,20 +73,20 @@ pub fn usage(argv: []u8) !void {
         \\
     , .{ argv, argv });
 
-    std.posix.exit(0);
+    try std.Io.File.stdout().writeStreamingAll(io, buffer);
+
+    std.process.exit(0);
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+pub fn main(init: std.process.Init) !void {
+    var gpa = std.heap.DebugAllocator(.{}){};
     const allocator = gpa.allocator();
     defer _ = gpa.deinit();
 
-    // Parse args into string array (error union needs 'try')
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     if (args.len != 3) {
-        try usage(args[0]);
+        try usage(allocator, init.io, args[0]);
     }
 
     var action = try Action.init(allocator);
@@ -108,5 +110,5 @@ pub fn main() !void {
 
     std.log.info("[+] Done", .{});
 
-    std.posix.exit(0);
+    std.process.exit(0);
 }

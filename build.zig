@@ -29,7 +29,7 @@ pub fn build(b: *std.Build) !void {
         "HighToTrustedInstaller_windows.zig",
         "InjectDLL_windows.zig",
         "InjectMe_windows_shared.zig",
-        //        "Minidump_windows.zig",
+        "Minidump_windows.zig",
         //        "ModifyPrivilege_windows.zig",
         //        "NTRights_windows.zig",
         //        "PasswordFilter_windows_shared.zig",
