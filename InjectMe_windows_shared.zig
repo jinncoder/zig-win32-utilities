@@ -10,7 +10,7 @@ const std = @import("std");
 
 const windows = std.os.windows;
 
-pub export fn DllMain(hinstDLL: win32.HINSTANCE, fdwReason: u32, lpReserved: windows.LPVOID) win32.BOOL {
+pub export fn DllMain(hinstDLL: win32.HINSTANCE, fdwReason: u32, lpReserved: windows.LPVOID) windows.BOOL {
     _ = lpReserved;
     _ = hinstDLL;
     switch (fdwReason) {
@@ -19,18 +19,22 @@ pub export fn DllMain(hinstDLL: win32.HINSTANCE, fdwReason: u32, lpReserved: win
             win32.OutputDebugStringA("InjectMe Process Attach");
         },
         win32.DLL_THREAD_ATTACH => {
+            _ = win32.MessageBoxA(null, "Injected", "THREAD ATTACH", .{});
             win32.OutputDebugStringA("InjectMe Thread Attach");
         },
         win32.DLL_THREAD_DETACH => {
+            _ = win32.MessageBoxA(null, "Injected", "THREAD DETACH", .{});
             win32.OutputDebugStringA("InjectMe Thread Detach");
         },
         win32.DLL_PROCESS_DETACH => {
+            _ = win32.MessageBoxA(null, "Injected", "PROCESS DETACH", .{});
             win32.OutputDebugStringA("InjectMe Process Detach");
         },
         else => {
+            _ = win32.MessageBoxA(null, "Injected", "weirdness...", .{});
             win32.OutputDebugStringA("InjectMe wut...");
         },
     }
 
-    return windows.TRUE;
+    return .TRUE;
 }

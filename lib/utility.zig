@@ -23,6 +23,18 @@ extern "advapi32" fn OpenProcessToken(
     TokenHandle: ?*?win32.HANDLE,
 ) callconv(std.os.windows.WINAPI) win32.BOOL;
 
+const OwnedSid = struct {
+    bytes: []u8,
+
+    pub fn sid(self: *const OwnedSid) win32.PSID {
+        return @ptrCast(self.bytes.ptr);
+    }
+
+    pub fn deinit(self: OwnedSid, allocator: std.mem.Allocator) void {
+        allocator.free(self.bytes);
+    }
+};
+
 pub fn closeHandle(handle: ?win32.HANDLE) void {
     if (handle != null and handle.? != win32.INVALID_HANDLE_VALUE) {
         // https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-closehandle
@@ -165,7 +177,7 @@ pub fn tryEnablePrivilege(hProcess: ?win32.HANDLE, lpName: ?[*:0]const u8, token
     return true;
 }
 
-pub fn getProcessOwnerSID(allocator: std.mem.Allocator, hToken: ?win32.HANDLE) !*?[]u64 {
+pub fn getProcessOwnerSID(allocator: std.mem.Allocator, hToken: ?win32.HANDLE) !OwnedSid {
     var dwSize: u32 = 0;
 
     // https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-gettokeninformation
@@ -198,12 +210,14 @@ pub fn getProcessOwnerSID(allocator: std.mem.Allocator, hToken: ?win32.HANDLE) !
     std.log.debug("dwSize :: {d}\n", .{dwSize});
 
     // Allocate memory for the SID
-    var ppSid: ?*win32.PSID = undefined;
-    var u64ppSid: ?[]u64 = try allocator.alloc(u64, dwSize);
-    ppSid.? = @ptrCast(&u64ppSid);
+    var bytes: ?[]u64 = try allocator.alloc(u64, dwSize);
 
     // https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-copysid
-    if (0 == win32.CopySid(dwSize, ppSid.?.*, pTokenUser.*.User.Sid)) {
+    if (0 == win32.CopySid(
+        dwSize,
+        &bytes,
+        pTokenUser.*.User.Sid,
+    )) {
         std.log.err("GetCurrentUserSid:CopySid failed. GetLastError: {d}\n", .{@intFromEnum(win32.GetLastError())});
         closeHandle(hToken);
         return Error.AccountNotFound;
@@ -223,7 +237,9 @@ pub fn getProcessOwnerSID(allocator: std.mem.Allocator, hToken: ?win32.HANDLE) !
     //     std.log.err("LocalFree failed {d}\n", .{@intFromEnum(win32.GetLastError())});
     // }
 
-    return &u64ppSid;
+    return .{
+        .bytes = bytes,
+    };
 }
 
 pub fn InstallService(
