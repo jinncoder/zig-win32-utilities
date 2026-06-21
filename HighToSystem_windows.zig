@@ -191,7 +191,7 @@ const Action = struct {
         // https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createprocesswithtokenw
         if (0 == win32.CreateProcessWithTokenW(
             self.targetDuplicateProcessToken,
-            win32.LOGON_NETCREDENTIALS_ONLY,
+            win32.LOGON_WITH_PROFILE,
             lpApplicationName,
             null,
             @bitCast(win32.CREATE_NEW_CONSOLE),

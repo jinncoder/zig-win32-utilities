@@ -24,9 +24,9 @@ pub fn build(b: *std.Build) !void {
     const sources = [_][]const u8{
         "AddUser_windows_shared.zig",
         "BackupOperatorToDomainAdministrator_windows.zig",
-        //        "Execute_windows.zig",
-        //        "HighToSystem_windows.zig",
-        //        "HighToTrustedInstaller_windows.zig",
+        "Execute_windows.zig",
+        "HighToSystem_windows.zig",
+        "HighToTrustedInstaller_windows.zig",
         //        "InjectDLL_windows.zig",
         //        "InjectMe_windows_shared.zig",
         //        "Minidump_windows.zig",
