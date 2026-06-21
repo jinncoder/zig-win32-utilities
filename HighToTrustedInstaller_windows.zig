@@ -10,25 +10,6 @@ const win32_security = @import("win32").security;
 
 const windows = std.os.windows;
 
-// https://learn.microsoft.com/en-us/cpp/build/x64-calling-convention?view=msvc-170
-
-// This exists until zigwin32 is updated to enable bitmasks for DesiredAccess /-:
-extern "advapi32" fn OpenProcessToken(
-    ProcessHandle: ?win32.HANDLE,
-    DesiredAccess: win32_security.TOKEN_ACCESS_MASK,
-    TokenHandle: ?*?win32.HANDLE,
-) callconv(windows.WINAPI) win32.BOOL;
-
-// This exists until zigwin32 is updated to enable bitmasks for DesiredAccess /-:
-pub extern "advapi32" fn DuplicateTokenEx(
-    hExistingToken: ?win32.HANDLE,
-    DesiredAccess: u32,
-    lpTokenAttributes: ?*win32.SECURITY_ATTRIBUTES,
-    ImpersonationLevel: win32.SECURITY_IMPERSONATION_LEVEL,
-    TokenType: win32.TOKEN_TYPE,
-    phNewToken: ?*?win32.HANDLE,
-) callconv(windows.WINAPI) win32.BOOL;
-
 const Action = struct {
     const Self = @This();
 
@@ -37,14 +18,16 @@ const Action = struct {
     tiPID: u32,
     sPID: u32,
     allocator: std.mem.Allocator,
+    io: std.Io,
 
-    pub fn init(allocator: std.mem.Allocator) !Self {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) !Self {
         return Self{
             .command = "",
             .targetPID = 0,
             .tiPID = 0,
             .sPID = 0,
             .allocator = allocator,
+            .io = io,
         };
     }
 
@@ -55,7 +38,7 @@ const Action = struct {
         // https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocess
         hProcess = win32.OpenProcess(
             win32.PROCESS_QUERY_LIMITED_INFORMATION,
-            windows.TRUE,
+            win32.TRUE,
             pid,
         );
         defer _ = Action.CloseHandle(hProcess);
@@ -67,7 +50,7 @@ const Action = struct {
         }
 
         // https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocesstoken
-        if (0 == OpenProcessToken(
+        if (0 == win32.OpenProcessToken(
             hProcess.?,
             win32_security.TOKEN_ALL_ACCESS,
             &sourceProcessToken,
@@ -94,9 +77,15 @@ const Action = struct {
         }
 
         // https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-duplicatetokenex
-        if (0 == DuplicateTokenEx(
+        if (0 == win32.DuplicateTokenEx(
             sourceProcessToken.?,
-            win32.MAXIMUM_ALLOWED,
+            win32_security.TOKEN_ACCESS_MASK{
+                .ASSIGN_PRIMARY = 1, // 0x0001 - documented requirement
+                .DUPLICATE = 1, // 0x0002 - documented requirement
+                .QUERY = 1, // 0x0008 - documented requirement
+                .ADJUST_DEFAULT = 1, // 0x0080 - needed internally for NtSetInformationToken
+                .ADJUST_SESSIONID = 1, // 0x0100 - needed internally for session assignment
+            },
             null,
             win32.SecurityImpersonation,
             win32.TokenPrimary,
@@ -236,7 +225,7 @@ const Action = struct {
         // https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocess
         const processHandle: ?win32.HANDLE = win32.OpenProcess(
             win32.PROCESS_QUERY_LIMITED_INFORMATION,
-            windows.TRUE,
+            win32.TRUE,
             self.tiPID,
         );
         defer _ = Action.CloseHandle(processHandle);
@@ -305,7 +294,7 @@ const Action = struct {
         pe32.dwSize = @sizeOf(win32.PROCESSENTRY32);
 
         // https://learn.microsoft.com/en-us/windows/win32/api/tlhelp32/nf-tlhelp32-process32first
-        if (windows.FALSE == win32.Process32First(
+        if (win32.FALSE == win32.Process32First(
             handle,
             &pe32,
         )) {
@@ -314,14 +303,19 @@ const Action = struct {
 
         if (self.targetPID == 0 and pe32.th32ProcessID == pid) {
             self.targetPID = pe32.th32ParentProcessID;
+            std.log.debug("targetPID: {d} == {d}\n", .{ self.targetPID, pid });
         }
+
+        std.log.debug("Pid {d} == {s}\n", .{ pe32.th32ProcessID, pe32.szExeFile });
 
         if (self.tiPID == 0 and std.mem.startsWith(u8, &pe32.szExeFile, "TrustedInstaller.exe")) {
             self.tiPID = pe32.th32ProcessID;
+            std.log.debug("tiPID: {d}\n", .{pe32.th32ProcessID});
         }
 
         if (self.sPID == 0 and std.mem.startsWith(u8, &pe32.szExeFile, "winlogon.exe")) {
             self.sPID = pe32.th32ProcessID;
+            std.log.debug("sPID: {d}\n", .{self.sPID});
         }
 
         if (self.targetPID != 0 and self.tiPID != 0 and self.sPID != 0) {
@@ -329,20 +323,25 @@ const Action = struct {
         }
 
         // https://learn.microsoft.com/en-us/windows/win32/api/tlhelp32/nf-tlhelp32-process32next
-        while (windows.TRUE == win32.Process32Next(
+        while (win32.TRUE == win32.Process32Next(
             handle,
             &pe32,
         )) {
+            std.log.debug("Pid {d} == {s}\n", .{ pe32.th32ProcessID, pe32.szExeFile });
+
             if (self.targetPID == 0 and pe32.th32ProcessID == pid) {
                 self.targetPID = pe32.th32ParentProcessID;
+                std.log.debug("targetPID: {d} == {d}\n", .{ self.targetPID, pid });
             }
 
             if (self.tiPID == 0 and std.mem.startsWith(u8, &pe32.szExeFile, "TrustedInstaller.exe")) {
                 self.tiPID = pe32.th32ProcessID;
+                std.log.debug("tiPID: {d}\n", .{pe32.th32ProcessID});
             }
 
             if (self.sPID == 0 and std.mem.startsWith(u8, &pe32.szExeFile, "winlogon.exe")) {
                 self.sPID = pe32.th32ProcessID;
+                std.log.debug("sPID: {d}\n", .{self.sPID});
             }
 
             if (self.targetPID != 0 and self.tiPID != 0 and self.sPID != 0) {
@@ -358,16 +357,16 @@ const Action = struct {
         );
     }
 
-    pub fn parsePID(self: *Self, line: []u8) !void {
-        self.targetPID = std.fmt.parseInt(u32, line, 10) catch undefined;
+    pub fn parsePID(self: *Self, line: [:0]const u8) !void {
+        self.targetPID = try std.fmt.parseInt(u32, line, 10);
     }
 
-    pub fn parseTIPID(self: *Self, line: []u8) !void {
-        self.tiPID = std.fmt.parseInt(u32, line, 10) catch undefined;
+    pub fn parseTIPID(self: *Self, line: [:0]const u8) !void {
+        self.tiPID = try std.fmt.parseInt(u32, line, 10);
     }
 
-    pub fn parseCommand(self: *Self, line: []u8) !void {
-        self.command = std.fmt.allocPrint(self.allocator, "{s}", .{line}) catch undefined;
+    pub fn parseCommand(self: *Self, line: [:0]const u8) !void {
+        self.command = try std.fmt.allocPrint(self.allocator, "{s}", .{line});
     }
 
     pub fn deinit(self: *Self) void {
@@ -385,10 +384,12 @@ const Action = struct {
     }
 };
 
-pub fn usage(argv: []u8) !void {
-    const stdout = std.io.getStdOut().writer();
-
-    try stdout.print(
+pub fn usage(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    argv: [:0]const u8,
+) !void {
+    const buffer: []u8 = try std.fmt.allocPrint(allocator,
         \\  This tool exist thanks to: 
         \\    * https://securitytimes.medium.com/understanding-and-abusing-access-tokens-part-ii-b9069f432962
         \\    * https://www.tiraniddo.dev/2017/08/the-art-of-becoming-trustedinstaller.html
@@ -411,23 +412,23 @@ pub fn usage(argv: []u8) !void {
         \\ .\\{s} 0 0
     , .{ argv, argv, argv });
 
-    std.posix.exit(0);
+    try std.Io.File.stdout().writeStreamingAll(io, buffer);
+
+    std.process.exit(0);
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+pub fn main(init: std.process.Init) !void {
+    var gpa = std.heap.DebugAllocator(.{}){};
     const allocator = gpa.allocator();
     defer _ = gpa.deinit();
 
-    // Parse args into string array (error union needs 'try')
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     if (args.len < 3) {
-        try usage(args[0]);
+        try usage(allocator, init.io, args[0]);
     }
 
-    var action = try Action.init(allocator);
+    var action = try Action.init(allocator, init.io);
     defer action.deinit();
 
     var i: u8 = 0;
@@ -449,14 +450,14 @@ pub fn main() !void {
     }
 
     if (action.command.len <= 0) {
-        action.command = std.fmt.allocPrint(action.allocator, "{s}", .{"C:\\windows\\system32\\cmd.exe"}) catch undefined;
+        action.command = try std.fmt.allocPrint(action.allocator, "{s}", .{"C:\\windows\\system32\\cmd.exe"});
     }
 
-    const file = std.fs.openFileAbsolute(action.command, .{}) catch {
+    const file = std.Io.Dir.openFileAbsolute(init.io, action.command, .{}) catch {
         std.log.err("[!] Failed to open {s}\n", .{action.command});
         return;
     };
-    file.close();
+    file.close(init.io);
 
     action.debug();
 
@@ -467,5 +468,5 @@ pub fn main() !void {
 
     std.log.info("[+] Executed {s}", .{action.command});
 
-    std.posix.exit(0);
+    std.process.exit(0);
 }
