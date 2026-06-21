@@ -77,19 +77,6 @@ const PRIVILEGES = [_][]const u8{
     win32.SE_DELEGATE_SESSION_USER_IMPERSONATE_NAME,
 };
 
-// See https://msdn.microsoft.com/en-us/library/windows/desktop/ms721859(v=vs.85).aspx#lsa_policy_function_return_values
-// and https://msdn.microsoft.com/en-us/library/cc704588.aspx
-const NTSTATUS_SUCCESS: i32 = 0x00000000;
-const NTSTATUS_ACCESS_DENIED: i32 = 0xC0000022;
-const NTSTATUS_INSUFFICIENT_RESOURCES: i32 = 0xC000009A;
-const NTSTATUS_INTERNAL_DB_ERROR: i32 = 0xC0000158;
-const NTSTATUS_INVALID_HANDLE: i32 = 0xC0000008;
-const NTSTATUS_INVALID_SERVER_STATE: i32 = 0xC00000DC;
-const NTSTATUS_INVALID_PARAMETER: i32 = 0xC000000D;
-const NTSTATUS_NO_SUCH_PRIVILEGE: i32 = 0xC0000060;
-const NTSTATUS_OBJECT_NAME_NOT_FOUND: i32 = 0xC0000034;
-const NTSTATUS_UNSUCCESSFUL: i32 = 0xC0000001;
-
 const Action = struct {
     const Self = @This();
 
@@ -149,7 +136,7 @@ const Action = struct {
             @ptrCast(&self.handle),
         );
 
-        if (ret != NTSTATUS_SUCCESS) {
+        if (ret != win32.STATUS_SUCCESS) {
             std.log.err("Failed to open policy handle {d}", .{win32.LsaNtStatusToWinError(ret)});
             return Self.Error.UnableToOpenPolicy;
         }
@@ -173,7 +160,7 @@ const Action = struct {
         // TODO: assume success?
         _ = win32.LsaFreeMemory(rd);
 
-        if (ret != NTSTATUS_SUCCESS) {
+        if (ret != win32.STATUS_SUCCESS) {
             std.log.err("LsaLookupNames2 error for {s} code {d}", .{ self.lpAccountName, win32.LsaNtStatusToWinError(ret) });
             _ = win32.LsaFreeMemory(sids);
             return Self.Error.AccountNotFound;
@@ -201,15 +188,15 @@ const Action = struct {
             &count,
         );
 
-        if (ret == @as(i32, @bitCast(@as(u32, 0xC0000034)))) {
-            // NTSTATUS_OBJECT_NAME_NOT_FOUND — account exists but has no rights assigned
+        if (ret == win32.STATUS_OBJECT_NAME_NOT_FOUND) {
+            // account exists but has no rights assigned
             const msg = try std.fmt.allocPrint(self.allocator, "No rights assigned to '{s}'\n", .{self.lpAccountName});
             defer self.allocator.free(msg);
             try std.Io.File.stdout().writeStreamingAll(io, msg);
             return;
         }
 
-        if (ret != NTSTATUS_SUCCESS) {
+        if (ret != win32.STATUS_SUCCESS) {
             std.log.err("LsaEnumerateAccountRights failed for '{s}': error {d}", .{ self.lpAccountName, win32.LsaNtStatusToWinError(ret) });
             return Self.Error.EnumerateRightsFailed;
         }
@@ -253,7 +240,7 @@ const Action = struct {
 
             std.log.debug("[{s}] Modifing {s}!", .{ prefix, privilege });
 
-            var ret = NTSTATUS_SUCCESS;
+            var ret = win32.STATUS_SUCCESS;
             var priv = try self.UnicodeStringFromString(@constCast(privilege));
 
             if (self.enable) {
@@ -275,7 +262,7 @@ const Action = struct {
                 );
             }
 
-            if (ret != NTSTATUS_SUCCESS) {
+            if (ret != win32.STATUS_SUCCESS) {
                 std.log.debug("[+] Modify LSA Error ret: {d}", .{win32.LsaNtStatusToWinError(ret)});
             }
         }
@@ -319,7 +306,7 @@ const Action = struct {
 
         // https://learn.microsoft.com/en-us/windows/win32/api/ntsecapi/nf-ntsecapi-lsaclose
         const ret = win32.LsaClose(self.handle);
-        if (ret != NTSTATUS_SUCCESS) {
+        if (ret != win32.STATUS_SUCCESS) {
             std.log.err("Failed to open policy handle {d} == 0x{x}", .{ ret, ret });
             return;
         }
