@@ -31,7 +31,7 @@ pub fn build(b: *std.Build) !void {
         "InjectMe_windows_shared.zig",
         "Minidump_windows.zig",
         "ModifyPrivilege_windows.zig",
-        //        "NTRights_windows.zig",
+        "NTRights_windows.zig",
         //        "PasswordFilter_windows_shared.zig",
         //        "ReflectDLL_windows.zig",
         //        "RelabelAbuse_windows.zig",
