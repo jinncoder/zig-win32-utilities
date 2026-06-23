@@ -181,20 +181,21 @@ pub fn getProcessOwnerSID(allocator: std.mem.Allocator, hToken: ?win32.HANDLE) !
     }
 
     // Allocate memory for the token information
-    var ptu = allocator.alloc(u8, dwSize) catch |err| {
+    const ptu = allocator.alloc(u8, dwSize) catch |err| {
         std.log.err("Memory allocation failed. {any}\n", .{err});
         closeHandle(hToken);
         return Error.AccountNotFound;
     };
+    defer allocator.free(ptu);
 
     // https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-gettokeninformation
-    if (0 == win32.GetTokenInformation(hToken, win32.TokenUser, @ptrCast(&ptu), dwSize, &dwSize)) {
+    if (0 == win32.GetTokenInformation(hToken, win32.TokenUser, @ptrCast(ptu.ptr), dwSize, &dwSize)) {
         std.log.err("GetCurrentUserSid:GetTokenInformation failed. GetLastError: {d}\n", .{@intFromEnum(win32.GetLastError())});
         closeHandle(hToken);
         return Error.AccountNotFound;
     }
 
-    const pTokenUser: *win32.TOKEN_USER = @ptrCast(&ptu);
+    const pTokenUser: *win32.TOKEN_USER = @ptrCast(@alignCast(ptu.ptr));
 
     // https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-getlengthsid
     dwSize = win32.GetLengthSid(pTokenUser.*.User.Sid);
@@ -203,12 +204,13 @@ pub fn getProcessOwnerSID(allocator: std.mem.Allocator, hToken: ?win32.HANDLE) !
     std.log.debug("dwSize :: {d}\n", .{dwSize});
 
     // Allocate memory for the SID
-    var bytes: ?[]u64 = try allocator.alloc(u64, dwSize);
+    const bytes: []u8 = try allocator.alloc(u8, dwSize);
+    errdefer allocator.free(bytes);
 
     // https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-copysid
     if (0 == win32.CopySid(
         dwSize,
-        &bytes,
+        @ptrCast(bytes.ptr),
         pTokenUser.*.User.Sid,
     )) {
         std.log.err("GetCurrentUserSid:CopySid failed. GetLastError: {d}\n", .{@intFromEnum(win32.GetLastError())});
