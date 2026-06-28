@@ -53,13 +53,6 @@ const PRIVILEGES = [_][]const u8{
     win32.SE_DELEGATE_SESSION_USER_IMPERSONATE_NAME,
 };
 
-// This exists until zigwin32 is updated to enable bitmasks for DesiredAccess /-:
-extern "advapi32" fn OpenProcessToken(
-    ProcessHandle: ?win32.HANDLE,
-    DesiredAccess: win32_security.TOKEN_ACCESS_MASK,
-    TokenHandle: ?*?win32.HANDLE,
-) callconv(windows.WINAPI) win32.BOOL;
-
 const Action = struct {
     const Self = @This();
 
@@ -85,7 +78,6 @@ const Action = struct {
 
     pub fn attemptModifyPrivilege(self: *Self) void {
         var tp: win32.TOKEN_PRIVILEGES = std.mem.zeroes(win32.TOKEN_PRIVILEGES);
-        var result: u32 = 0;
 
         tp.PrivilegeCount = 1;
         tp.Privileges[0].Attributes = win32.SE_PRIVILEGE_ENABLED;
@@ -105,7 +97,7 @@ const Action = struct {
                 continue;
             }
 
-            const lpName = std.fmt.allocPrintZ(self.allocator, "{s}", .{privilege}) catch return;
+            const lpName = std.fmt.allocPrintSentinel(self.allocator, "{s}", .{privilege}, 0) catch return;
             defer self.allocator.free(lpName);
 
             // https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-lookupprivilegevaluea
@@ -127,96 +119,89 @@ const Action = struct {
                 @ptrFromInt(0),
                 @ptrFromInt(0),
             )) {
-                result = @intFromEnum(win32.GetLastError());
-                if (result == @intFromEnum(win32.WIN32_ERROR.ERROR_INVALID_HANDLE)) {
-                    std.log.err("[!] Failed AdjustTokenPrivileges {s} - invalid handle :: error code ({d})", .{ privilege, result });
-                    break;
-                } else {
-                    std.log.err("[!] Failed AdjustTokenPrivileges {s} :: error code ({d})", .{ privilege, result });
-                }
+                std.log.err("[!] Failed AdjustTokenPrivileges {s} :: error code ({d})", .{ privilege, @intFromEnum(win32.GetLastError()) });
             }
 
-            result = @intFromEnum(win32.GetLastError());
-            if (result != 0) {
-                if (result == 1300) { // win32.WIN32_ERROR.ERROR_NOT_ALL_ASSIGNED
-                    std.log.err("[!] Failed to modify privilege {s} :: error code ({d})", .{ privilege, result });
-                } else {
-                    std.log.err("[-] Failed to modify {s} :: error code ({d})", .{ privilege, result });
-                }
+            const result = win32.GetLastError();
+
+            if (result != win32.ERROR_SUCCESS) {
+                std.log.err("[!] Failed AdjustTokenPrivileges {s} :: error code ({d})", .{ privilege, @intFromEnum(result) });
             } else {
-                std.log.info("[+] Modified {s}", .{privilege});
+                std.log.info("[+] Modified {s} {d}", .{ privilege, @intFromEnum(win32.GetLastError()) });
             }
         }
     }
 
-    pub fn getToken(self: *Self) bool {
+    pub fn getToken(self: *Self) !void {
         if (self.targetPID == 0) {
             self.targetPID = Action.PPID();
         }
 
         if (self.targetPID == 0) {
             std.log.err("[!] Failed to locate parent process Id :: error code ({d})", .{@intFromEnum(win32.GetLastError())});
-            return false;
+            return error.targetPID;
         }
-
-        std.log.debug("[+] OpenProcess({d})", .{self.targetPID});
 
         // https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocess
         self.hProcess = win32.OpenProcess(
-            win32.PROCESS_QUERY_LIMITED_INFORMATION,
-            windows.TRUE,
+            win32.PROCESS_QUERY_INFORMATION,
+            win32.TRUE,
             self.targetPID,
         );
-        defer _ = Action.CloseHandle(self.hProcess);
-        const result = @intFromEnum(win32.GetLastError());
-
-        if (result != 0) {
-            std.log.err("[!] Failed OpenProcess :: error code ({d})", .{result});
-            return false;
+        if (self.hProcess == null) {
+            std.log.err("[!] Failed to OpenProcess {d} :: error code ({d})", .{ self.targetPID, @intFromEnum(win32.GetLastError()) });
+            return error.OpenProcessFailed;
         }
+        defer _ = Action.CloseHandle(self.hProcess);
+        std.log.debug("[+] OpenProcess({d})", .{self.targetPID});
 
         // https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocesstoken
-        if (0 == OpenProcessToken(
+        if (0 == win32.OpenProcessToken(
             self.hProcess.?,
-            win32_security.TOKEN_ALL_ACCESS,
+            win32_security.TOKEN_ACCESS_MASK{
+                .ADJUST_PRIVILEGES = 1,
+                .QUERY = 1,
+            },
             &self.token,
         )) {
             std.log.err("[!] Failed OpenProcessToken :: error code ({d})", .{@intFromEnum(win32.GetLastError())});
-            return false;
+            return error.OpenProcessTokenFailed;
         }
-
-        return true;
     }
 
     pub fn debug(self: *Self) void {
         std.log.info(
-            "\nModify Privileges for PID :: {d}\n",
+            "\nModify Privileges for PID :: {d}",
             .{self.targetPID},
         );
+
+        if (self.remove) {
+            std.log.info("Remove:", .{});
+        }
+        if (!self.enable) {
+            std.log.info("Disable:", .{});
+        }
+        if (self.enable) {
+            std.log.info("Enable:", .{});
+        }
+
         var itr = self.privilege.keyIterator();
 
         while (itr.next()) |k| {
             std.log.info("\t{d} == {s}", .{ k.*, PRIVILEGES[k.*] });
         }
-        std.log.info("\n", .{});
     }
 
-    pub fn parsePID(self: *Self, line: []u8) !void {
-        self.targetPID = std.fmt.parseInt(u32, line, 10) catch undefined;
+    pub fn parsePID(self: *Self, line: [:0]const u8) !void {
+        self.targetPID = try std.fmt.parseInt(u32, line, 10);
     }
 
-    pub fn parsePrivileges(self: *Self, line: []u8) !void {
+    pub fn parsePrivileges(self: *Self, line: [:0]const u8) !void {
         var possible = std.mem.tokenizeSequence(u8, line, ",");
 
         while (possible.next()) |id| {
-            const value = std.fmt.parseUnsigned(u32, id, 10) catch |err| {
-                std.log.debug("E {any}\n", .{err});
-                return;
-            };
-            self.privilege.put(value, 1) catch |err| {
-                std.log.debug("E {any}\n", .{err});
-                return;
-            };
+            const value = try std.fmt.parseUnsigned(u32, id, 10);
+            try self.privilege.put(value, 1);
         }
     }
 
@@ -255,7 +240,7 @@ const Action = struct {
         pe32.dwSize = @sizeOf(win32.PROCESSENTRY32);
 
         // https://learn.microsoft.com/en-us/windows/win32/api/tlhelp32/nf-tlhelp32-process32first
-        if (windows.FALSE == win32.Process32First(
+        if (win32.FALSE == win32.Process32First(
             handle,
             &pe32,
         )) {
@@ -267,7 +252,7 @@ const Action = struct {
         }
 
         // https://learn.microsoft.com/en-us/windows/win32/api/tlhelp32/nf-tlhelp32-process32next
-        while (windows.TRUE == win32.Process32Next(
+        while (win32.TRUE == win32.Process32Next(
             handle,
             &pe32,
         )) {
@@ -280,10 +265,12 @@ const Action = struct {
     }
 };
 
-pub fn usage(argv: []u8) !void {
-    const stdout = std.io.getStdOut().writer();
-
-    try stdout.print(
+pub fn usage(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    argv: [:0]const u8,
+) !void {
+    var buffer: []u8 = try std.fmt.allocPrint(allocator,
         \\  This tool exist thanks to https://raw.githubusercontent.com/fashionproof/EnableAllTokenPrivs/master/EnableAllTokenPrivs.ps1 and https://www.leeholmes.com/blog/2010/09/24/adjusting-token-privileges-in-powershell/
         \\
         \\Example:
@@ -297,36 +284,35 @@ pub fn usage(argv: []u8) !void {
         \\ .\\{s} 9001 18,33
         \\
         \\ Attempt to disable the privileges SeShutdown & SeTimeZone for the process where PID == 9001:
-        \\ .\\{s} 9001 18,33 -d
+        \\ .\\{s} 9001 18,33 -disable
         \\
         \\ Attempt to remove the privileges SeShutdown & SeTimeZone for the process where PID == 9001:
-        \\ .\\{s} 9001 18,33 -r
+        \\ .\\{s} 9001 18,33 -remove
         \\
         \\ Show this menu
         \\ .\\{s} -h
         \\
     , .{ argv, argv, argv, argv, argv, argv });
 
-    try stdout.print("\n", .{});
-    for (PRIVILEGES, 0..) |privilege, idx| {
-        try stdout.print("\t{d} = {s}\n", .{ idx, privilege });
-    }
-    try stdout.print("\n", .{});
+    try std.Io.File.stdout().writeStreamingAll(io, buffer);
 
-    std.posix.exit(0);
+    for (PRIVILEGES, 0..) |privilege, idx| {
+        buffer = try std.fmt.allocPrint(allocator, "\t{d} = {s}\n", .{ idx, privilege });
+        try std.Io.File.stdout().writeStreamingAll(io, buffer);
+    }
+
+    std.process.exit(0);
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+pub fn main(init: std.process.Init) !void {
+    var gpa = std.heap.DebugAllocator(.{}){};
     const allocator = gpa.allocator();
     defer _ = gpa.deinit();
 
-    // Parse args into string array (error union needs 'try')
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     if (args.len > 4) {
-        try usage(args[0]);
+        try usage(allocator, init.io, args[0]);
     }
 
     var action = try Action.init(allocator);
@@ -335,16 +321,15 @@ pub fn main() !void {
     var i: u8 = 0;
 
     for (args) |arg| {
-        if (std.mem.containsAtLeast(u8, arg, 1, "-h") or std.mem.containsAtLeast(u8, arg, 1, "-H")) {
-            try usage(args[0]);
-            std.posix.exit(0);
+        if (std.mem.containsAtLeast(u8, arg, 1, "-h")) {
+            try usage(allocator, init.io, args[0]);
         }
 
-        if (std.mem.containsAtLeast(u8, arg, 1, "-d") or std.mem.containsAtLeast(u8, arg, 1, "-D")) {
+        if (std.mem.containsAtLeast(u8, arg, 1, "-disable")) {
             action.enable = false;
         }
 
-        if (std.mem.containsAtLeast(u8, arg, 1, "-r") or std.mem.containsAtLeast(u8, arg, 1, "-R")) {
+        if (std.mem.containsAtLeast(u8, arg, 1, "-remove")) {
             action.remove = true;
         }
 
@@ -361,14 +346,14 @@ pub fn main() !void {
 
     action.debug();
 
-    if (!action.getToken()) {
+    action.getToken() catch {
         std.log.err("[!] Failed to get token for process", .{});
         return;
-    }
+    };
 
     action.attemptModifyPrivilege();
 
     std.log.info("[+] Done", .{});
 
-    std.posix.exit(0);
+    std.process.exit(0);
 }

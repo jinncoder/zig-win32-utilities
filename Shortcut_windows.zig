@@ -2,11 +2,9 @@ const std = @import("std");
 
 pub const UNICODE = true;
 
-const win32 = struct {
-    usingnamespace @import("win32").system.com;
-    usingnamespace @import("win32").zig;
-    usingnamespace @import("win32").ui.shell;
-};
+const win32 = @import("win32").everything;
+
+const panic = std.debug.FullPanic(std.debug.defaultPanic);
 
 // set log level by build type
 pub const default_level: std.Level = switch (std.builtin.mode) {
@@ -36,7 +34,7 @@ const Action = struct {
         {
             // https://learn.microsoft.com/en-us/windows/win32/api/objbase/nf-objbase-coinitialize
             const status = win32.CoInitialize(
-                null, //    [in, optional] LPVOID pvReserved
+                null,
             );
             if (win32.FAILED(status)) {
                 std.log.err("CoInitialize FAILED: {d}", .{status});
@@ -46,15 +44,15 @@ const Action = struct {
         // https://learn.microsoft.com/en-us/windows/win32/api/combaseapi/nf-combaseapi-couninitialize
         defer win32.CoUninitialize();
 
-        var ppv: *win32.IShellLink = undefined;
+        var ppv: *win32.IShellLinkW = undefined;
         {
             // https://learn.microsoft.com/en-us/windows/win32/api/combaseapi/nf-combaseapi-cocreateinstance
             const status = win32.CoCreateInstance(
-                win32.CLSID_ShellLink, //       [in]  REFCLSID  rclsid
-                null, //                        [in]  LPUNKNOWN pUnkOuter
-                win32.CLSCTX_INPROC_SERVER, //  [in]  DWORD     dwClsContext
-                win32.IID_IShellLinkW, //       [in]  REFIID    riid
-                @ptrCast(&ppv), //              [out] LPVOID    *ppv
+                win32.CLSID_ShellLink,
+                null,
+                win32.CLSCTX_INPROC_SERVER,
+                win32.IID_IShellLinkW,
+                @ptrCast(&ppv),
             );
             if (win32.FAILED(status)) {
                 std.log.err("CoCreateInstance FAILED: {d}", .{status});
@@ -70,7 +68,7 @@ const Action = struct {
 
             // https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-ishelllinka-setworkingdirectory
             const status = ppv.SetWorkingDirectory(
-                pszDir, // [in] LPCSTR pszDir
+                pszDir,
             );
             if (win32.FAILED(status)) {
                 std.log.err("IShellLinkW_SetWorkingDirectory FAILED: {d}", .{status});
@@ -84,7 +82,7 @@ const Action = struct {
 
             // https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-ishelllinka-setpath
             const status = ppv.SetPath(
-                pszFile, // [in] LPCSTR pszFile
+                pszFile,
             );
             if (win32.FAILED(status)) {
                 std.log.err("IShellLinkW_SetPath FAILED: {d}", .{status});
@@ -99,7 +97,7 @@ const Action = struct {
 
                 // https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-ishelllinka-setpath
                 const status = ppv.SetArguments(
-                    pszArgs, // [in] LPCWSTR pszArgs
+                    pszArgs,
                 );
                 if (win32.FAILED(status)) {
                     std.log.err("IShellLinkW_SetPath FAILED: {d}", .{status});
@@ -115,8 +113,8 @@ const Action = struct {
             // https://learn.microsoft.com/en-us/windows/win32/api/unknwn/nf-unknwn-iunknown-queryinterface(refiid_void)
             const status = win32.IUnknown.QueryInterface(
                 @ptrCast(ppv),
-                win32.IID_IPersistFile, //  [in] REFIID riid,
-                @ptrCast(&ppvObject), //    [in] void   **ppvObject
+                win32.IID_IPersistFile,
+                @ptrCast(&ppvObject),
             );
             if (win32.FAILED(status)) {
                 std.log.err("IUnknown_QueryInterface FAILED: {d}", .{status});
@@ -132,8 +130,8 @@ const Action = struct {
 
             // https://learn.microsoft.com/en-us/windows/win32/api/objidl/nf-objidl-ipersistfile-save
             const status = ppvObject.Save(
-                destination, // [in] LPCOLESTR pszFileName,
-                1, //           [in] BOOL      fRemember
+                destination,
+                1,
             );
             if (win32.FAILED(status)) {
                 std.log.err("IPersistFile_Save FAILED: {d}", .{status});
@@ -151,34 +149,45 @@ const Action = struct {
         );
     }
 
-    pub fn parseSource(self: *Self, line: []u8) !void {
-        self.source = std.fmt.allocPrintZ(self.allocator, "{s}", .{line}) catch "";
+    pub fn parseSource(self: *Self, line: [:0]const u8) !void {
+        self.source = std.fmt.allocPrint(self.allocator, "{s}\x00", .{line}) catch "";
     }
 
-    pub fn parseDestination(self: *Self, line: []u8) !void {
-        self.destination = std.fmt.allocPrintZ(self.allocator, "{s}", .{line}) catch "";
+    pub fn parseDestination(self: *Self, line: [:0]const u8) !void {
+        self.destination = std.fmt.allocPrint(self.allocator, "{s}\x00", .{line}) catch "";
     }
 
-    pub fn parseWorkingDirectory(self: *Self, line: []u8) !void {
-        self.workingDirectory = std.fmt.allocPrintZ(self.allocator, "{s}", .{line}) catch "";
+    pub fn parseWorkingDirectory(self: *Self, line: [:0]const u8) !void {
+        self.workingDirectory = std.fmt.allocPrint(self.allocator, "{s}\x00", .{line}) catch "";
     }
 
-    pub fn parseArguments(self: *Self, line: []u8) !void {
-        self.arguments = std.fmt.allocPrintZ(self.allocator, "{s}", .{line}) catch "";
+    pub fn parseArguments(self: *Self, line: [:0]const u8) !void {
+        self.arguments = std.fmt.allocPrint(self.allocator, "{s}\x00", .{line}) catch "";
     }
 
     pub fn deinit(self: *Self) void {
-        self.allocator.free(self.source);
-        self.allocator.free(self.destination);
-        self.allocator.free(self.workingDirectory);
-        self.allocator.free(self.arguments);
+        if (self.source.len > 0) {
+            self.allocator.free(self.source);
+        }
+        if (self.destination.len > 0) {
+            self.allocator.free(self.destination);
+        }
+        if (self.workingDirectory.len > 0) {
+            self.allocator.free(self.workingDirectory);
+        }
+
+        if (self.arguments.len > 0) {
+            self.allocator.free(self.arguments);
+        }
     }
 };
 
-pub fn usage(argv: []u8) !void {
-    const stdout = std.io.getStdOut().writer();
-
-    try stdout.print(
+pub fn usage(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    argv: [:0]const u8,
+) !void {
+    const buffer: []u8 = try std.fmt.allocPrint(allocator,
         \\
         \\Usage:
         \\
@@ -196,20 +205,20 @@ pub fn usage(argv: []u8) !void {
         \\
     , .{ argv, argv });
 
-    std.posix.exit(0);
+    try std.Io.File.stdout().writeStreamingAll(io, buffer);
+
+    std.process.exit(0);
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+pub fn main(init: std.process.Init) !void {
+    var gpa = std.heap.DebugAllocator(.{}){};
     const allocator = gpa.allocator();
     defer _ = gpa.deinit();
 
-    // Parse args into string array (error union needs 'try')
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     if (args.len < 2) {
-        try usage(args[0]);
+        try usage(allocator, init.io, args[0]);
     }
 
     var action = try Action.init(allocator);
@@ -219,8 +228,8 @@ pub fn main() !void {
 
     for (args) |arg| {
         if (std.mem.containsAtLeast(u8, arg, 1, "-h") or std.mem.containsAtLeast(u8, arg, 1, "-H")) {
-            try usage(args[0]);
-            std.posix.exit(0);
+            try usage(allocator, init.io, args[0]);
+            std.process.exit(0);
         }
 
         if (i == 1) {
@@ -248,7 +257,7 @@ pub fn main() !void {
 
     if (!success) {
         std.log.info("[!] Failed", .{});
-        std.posix.exit(1);
+        std.process.exit(1);
     }
 
     std.log.info("[+] Done", .{});

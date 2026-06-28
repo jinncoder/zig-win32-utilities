@@ -55,3 +55,4 @@ if __name__ == "__main__":
 
         stream.shutdown(socket.SHUT_RDWR)
         stream.close()
+        print(f"[+] Connection closed {address}")

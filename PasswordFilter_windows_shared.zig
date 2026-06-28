@@ -20,8 +20,6 @@ pub const default_level: std.Level = switch (std.builtin.mode) {
     .ReleaseSafe, .ReleaseFast, .ReleaseSmall => .info,
 };
 
-const WINAPI = windows.WINAPI;
-
 export fn InitializeChangeNotify() void {}
 
 export fn PasswordFilter(
@@ -30,7 +28,7 @@ export fn PasswordFilter(
     _: *win32.UNICODE_STRING, // Password
     _: win32.BOOL, // SetOperation
 ) win32.BOOL {
-    return windows.TRUE;
+    return win32.TRUE;
 }
 
 fn writeAll(hFile: win32.HANDLE, buffer: []const u8) !void {
@@ -64,7 +62,7 @@ export fn PasswordChangeNotify(
     if (win32.STATUS_SUCCESS != win32.RtlUnicodeStringToAnsiString(
         &ansiUsername,
         UserName,
-        windows.TRUE,
+        win32.TRUE,
     )) {
         return win32.STATUS_SUCCESS;
     }
@@ -74,24 +72,20 @@ export fn PasswordChangeNotify(
     if (win32.STATUS_SUCCESS != win32.RtlUnicodeStringToAnsiString(
         &ansiPassword,
         NewPassword,
-        windows.TRUE,
+        win32.TRUE,
     )) {
         return win32.STATUS_SUCCESS;
     }
 
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     const allocator = gpa.allocator();
     defer _ = gpa.deinit();
 
-    const usernameRIDPassword = std.fmt.allocPrintZ(
-        allocator,
-        "{s}:{d}:{s}\n",
-        .{
-            ansiUsername.Buffer.?[0..ansiUsername.Length],
-            RelativeId,
-            ansiPassword.Buffer.?[0..ansiPassword.Length],
-        },
-    ) catch return win32.STATUS_SUCCESS;
+    const usernameRIDPassword = std.fmt.allocPrintSentinel(allocator, "{s}:{d}:{s}\n", .{
+        ansiUsername.Buffer.?[0..ansiUsername.Length],
+        RelativeId,
+        ansiPassword.Buffer.?[0..ansiPassword.Length],
+    }, 0) catch return win32.STATUS_SUCCESS;
     defer allocator.free(usernameRIDPassword);
 
     // https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-rtlfreeansistring

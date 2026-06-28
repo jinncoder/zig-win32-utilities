@@ -77,19 +77,6 @@ const PRIVILEGES = [_][]const u8{
     win32.SE_DELEGATE_SESSION_USER_IMPERSONATE_NAME,
 };
 
-// See https://msdn.microsoft.com/en-us/library/windows/desktop/ms721859(v=vs.85).aspx#lsa_policy_function_return_values
-// and https://msdn.microsoft.com/en-us/library/cc704588.aspx
-const NTSTATUS_SUCCESS: i32 = 0x00000000;
-const NTSTATUS_ACCESS_DENIED: i32 = 0xC0000022;
-const NTSTATUS_INSUFFICIENT_RESOURCES: i32 = 0xC000009A;
-const NTSTATUS_INTERNAL_DB_ERROR: i32 = 0xC0000158;
-const NTSTATUS_INVALID_HANDLE: i32 = 0xC0000008;
-const NTSTATUS_INVALID_SERVER_STATE: i32 = 0xC00000DC;
-const NTSTATUS_INVALID_PARAMETER: i32 = 0xC000000D;
-const NTSTATUS_NO_SUCH_PRIVILEGE: i32 = 0xC0000060;
-const NTSTATUS_OBJECT_NAME_NOT_FOUND: i32 = 0xC0000034;
-const NTSTATUS_UNSUCCESSFUL: i32 = 0xC0000001;
-
 const Action = struct {
     const Self = @This();
 
@@ -98,10 +85,12 @@ const Action = struct {
         AccountNotFound,
         NoMemory,
         UnableToOpenPolicy,
+        EnumerateRightsFailed,
     };
 
     privilege: std.AutoHashMap(u32, u32),
     enable: bool,
+    show: bool,
     allocator: std.mem.Allocator,
     sid: *win32.SID,
     lpAccountName: [:0]u8,
@@ -111,6 +100,7 @@ const Action = struct {
         return Self{
             .privilege = std.AutoHashMap(u32, u32).init(allocator),
             .enable = true,
+            .show = false,
             .allocator = allocator,
             .sid = undefined,
             .lpAccountName = undefined,
@@ -146,7 +136,7 @@ const Action = struct {
             @ptrCast(&self.handle),
         );
 
-        if (ret != NTSTATUS_SUCCESS) {
+        if (ret != win32.STATUS_SUCCESS) {
             std.log.err("Failed to open policy handle {d}", .{win32.LsaNtStatusToWinError(ret)});
             return Self.Error.UnableToOpenPolicy;
         }
@@ -170,13 +160,64 @@ const Action = struct {
         // TODO: assume success?
         _ = win32.LsaFreeMemory(rd);
 
-        if (ret != NTSTATUS_SUCCESS) {
+        if (ret != win32.STATUS_SUCCESS) {
             std.log.err("LsaLookupNames2 error for {s} code {d}", .{ self.lpAccountName, win32.LsaNtStatusToWinError(ret) });
             _ = win32.LsaFreeMemory(sids);
             return Self.Error.AccountNotFound;
         }
 
         return sids;
+    }
+
+    // https://learn.microsoft.com/en-us/windows/win32/api/ntsecapi/nf-ntsecapi-lsaenumerateaccountrights
+    pub fn showPrivileges(self: *Self, io: std.Io) !void {
+        try self.getPolicyHandle();
+        std.log.debug("[+] LsaOpenPolicy Success!", .{});
+
+        const sids = try self.getAccountNameSid();
+        defer _ = win32.LsaFreeMemory(sids);
+        std.log.debug("[+] getAccountNameSid Success! use: {d}", .{@intFromEnum(sids.*.Use)});
+
+        var rights: [*]win32.UNICODE_STRING = undefined;
+        var count: u32 = 0;
+
+        const ret = win32.LsaEnumerateAccountRights(
+            self.handle,
+            sids.*.Sid,
+            @ptrCast(&rights),
+            &count,
+        );
+
+        if (ret == win32.STATUS_OBJECT_NAME_NOT_FOUND) {
+            // account exists but has no rights assigned
+            const msg = try std.fmt.allocPrint(self.allocator, "No rights assigned to '{s}'\n", .{self.lpAccountName});
+            defer self.allocator.free(msg);
+            try std.Io.File.stdout().writeStreamingAll(io, msg);
+            return;
+        }
+
+        if (ret != win32.STATUS_SUCCESS) {
+            std.log.err("LsaEnumerateAccountRights failed for '{s}': error {d}", .{ self.lpAccountName, win32.LsaNtStatusToWinError(ret) });
+            return Self.Error.EnumerateRightsFailed;
+        }
+        defer _ = win32.LsaFreeMemory(rights);
+
+        const header = try std.fmt.allocPrint(self.allocator, "Rights assigned to '{s}' ({d} total):\n", .{ self.lpAccountName, count });
+        defer self.allocator.free(header);
+        try std.Io.File.stdout().writeStreamingAll(io, header);
+
+        for (0..count) |i| {
+            const us = rights[i];
+            // UNICODE_STRING.Length is in bytes; Buffer is [*]u16
+            const len_chars = us.Length / @sizeOf(u16);
+            const buf = us.Buffer orelse continue;
+            const utf8 = try std.unicode.utf16LeToUtf8Alloc(self.allocator, buf[0..len_chars]);
+            defer self.allocator.free(utf8);
+
+            const line = try std.fmt.allocPrint(self.allocator, "  {s}\n", .{utf8});
+            defer self.allocator.free(line);
+            try std.Io.File.stdout().writeStreamingAll(io, line);
+        }
     }
 
     pub fn attemptModifyPrivilege(self: *Self) !void {
@@ -199,7 +240,7 @@ const Action = struct {
 
             std.log.debug("[{s}] Modifing {s}!", .{ prefix, privilege });
 
-            var ret = NTSTATUS_SUCCESS;
+            var ret = win32.STATUS_SUCCESS;
             var priv = try self.UnicodeStringFromString(@constCast(privilege));
 
             if (self.enable) {
@@ -221,7 +262,7 @@ const Action = struct {
                 );
             }
 
-            if (ret != NTSTATUS_SUCCESS) {
+            if (ret != win32.STATUS_SUCCESS) {
                 std.log.debug("[+] Modify LSA Error ret: {d}", .{win32.LsaNtStatusToWinError(ret)});
             }
         }
@@ -231,21 +272,20 @@ const Action = struct {
     }
 
     pub fn debug(self: *Self) void {
-        std.log.info("\nModify Privileges for user\n", .{});
+        std.log.info("Modify Privileges for user", .{});
         var itr = self.privilege.keyIterator();
 
         while (itr.next()) |k| {
             std.log.info("\t{d} == {s}", .{ k.*, PRIVILEGES[k.*] });
         }
-        std.log.info("\n", .{});
     }
 
-    pub fn parseUsername(self: *Self, line: []u8) !void {
-        self.lpAccountName = try std.fmt.allocPrintZ(self.allocator, "{s}", .{line});
+    pub fn parseUsername(self: *Self, line: [:0]const u8) !void {
+        self.lpAccountName = try std.fmt.allocPrintSentinel(self.allocator, "{s}", .{line}, 0);
         errdefer self.allocator.free(self.lpAccountName);
     }
 
-    pub fn parsePrivileges(self: *Self, line: []u8) !void {
+    pub fn parsePrivileges(self: *Self, line: [:0]const u8) !void {
         var possible = std.mem.tokenizeSequence(u8, line, ",");
 
         while (possible.next()) |id| {
@@ -266,7 +306,7 @@ const Action = struct {
 
         // https://learn.microsoft.com/en-us/windows/win32/api/ntsecapi/nf-ntsecapi-lsaclose
         const ret = win32.LsaClose(self.handle);
-        if (ret != NTSTATUS_SUCCESS) {
+        if (ret != win32.STATUS_SUCCESS) {
             std.log.err("Failed to open policy handle {d} == 0x{x}", .{ ret, ret });
             return;
         }
@@ -274,10 +314,12 @@ const Action = struct {
     }
 };
 
-pub fn usage(argv: []u8) !void {
-    const stdout = std.io.getStdOut().writer();
-
-    try stdout.print(
+pub fn usage(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    argv: [:0]const u8,
+) !void {
+    var buffer: []u8 = try std.fmt.allocPrint(allocator,
         \\  This tool exist thanks to https://github.com/petemoore/ntr
         \\
         \\Example:
@@ -286,33 +328,35 @@ pub fn usage(argv: []u8) !void {
         \\ .\\{s} pete 18,33
         \\
         \\ Attempt to disable the privileges SeShutdown & SeTimeZone for the user 'pete':
-        \\ .\\{s} pete 18,33 -d
+        \\ .\\{s} pete 18,33 -disable
+        \\
+        \\ Show all rights currently assigned to the user 'pete':
+        \\ .\\{s} pete -show
         \\
         \\ Show this menu
         \\ .\\{s} -h
         \\
-    , .{ argv, argv, argv });
+    , .{ argv, argv, argv, argv });
 
-    try stdout.print("\n", .{});
+    try std.Io.File.stdout().writeStreamingAll(io, buffer);
+
     for (PRIVILEGES, 0..) |privilege, idx| {
-        try stdout.print("\t{d} = {s}\n", .{ idx, privilege });
+        buffer = try std.fmt.allocPrint(allocator, "\t{d} = {s}\n", .{ idx, privilege });
+        try std.Io.File.stdout().writeStreamingAll(io, buffer);
     }
-    try stdout.print("\n", .{});
 
-    std.posix.exit(0);
+    std.process.exit(0);
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+pub fn main(init: std.process.Init) !void {
+    var gpa = std.heap.DebugAllocator(.{}){};
     const allocator = gpa.allocator();
     defer _ = gpa.deinit();
 
-    // Parse args into string array (error union needs 'try')
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     if (args.len > 4) {
-        try usage(args[0]);
+        try usage(allocator, init.io, args[0]);
     }
 
     var action = try Action.init(allocator);
@@ -321,30 +365,38 @@ pub fn main() !void {
     var i: u8 = 0;
 
     for (args) |arg| {
-        if (std.mem.containsAtLeast(u8, arg, 1, "-h") or std.mem.containsAtLeast(u8, arg, 1, "-H")) {
-            try usage(args[0]);
-            std.posix.exit(0);
+        if (std.mem.containsAtLeast(u8, arg, 1, "-h")) {
+            try usage(allocator, init.io, args[0]);
         }
 
-        if (std.mem.containsAtLeast(u8, arg, 1, "-d") or std.mem.containsAtLeast(u8, arg, 1, "-D")) {
+        if (std.mem.containsAtLeast(u8, arg, 1, "-disable")) {
             action.enable = false;
+        }
+
+        if (std.mem.containsAtLeast(u8, arg, 1, "-show")) {
+            action.show = true;
         }
 
         if (i == 1) {
             try action.parseUsername(arg);
         }
 
-        if (i == 2) {
+        if (i == 2 and !action.show) {
             try action.parsePrivileges(arg);
         }
 
         i += 1;
     }
 
-    action.debug();
-    try action.attemptModifyPrivilege();
+    if (action.show) {
+        try action.showPrivileges(init.io);
+    } else {
+        action.debug();
+
+        try action.attemptModifyPrivilege();
+    }
 
     std.log.info("[+] Done", .{});
 
-    std.posix.exit(0);
+    std.process.exit(0);
 }

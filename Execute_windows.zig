@@ -7,8 +7,6 @@ pub const default_level: std.Level = switch (std.builtin.mode) {
 const std = @import("std");
 const win32 = @import("win32").everything;
 
-// https://learn.microsoft.com/en-us/cpp/build/x64-calling-convention?view=msvc-170
-
 const Action = struct {
     const Self = @This();
 
@@ -18,11 +16,13 @@ const Action = struct {
 
     command: []u8,
     allocator: std.mem.Allocator,
+    io: std.Io,
 
-    pub fn init(allocator: std.mem.Allocator) !Self {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) !Self {
         return Self{
             .command = "",
             .allocator = allocator,
+            .io = io,
         };
     }
 
@@ -132,7 +132,7 @@ const Action = struct {
         if (win32.WaitForSingleObject(
             processInformation.hProcess,
             win32.INFINITE,
-        ) == @intFromEnum(win32.WAIT_FAILED)) {
+        ) == win32.WAIT_FAILED) {
             std.log.err("WaitForSingleObject GetLastError: {d}\n", .{@intFromEnum(win32.GetLastError())});
             return false;
         }
@@ -148,7 +148,7 @@ const Action = struct {
         return true;
     }
 
-    pub fn parseCommand(self: *Self, line: []u8) !void {
+    pub fn parseCommand(self: *Self, line: [:0]const u8) !void {
         self.command = std.fmt.allocPrint(self.allocator, "{s}", .{line}) catch undefined;
     }
 
@@ -164,20 +164,20 @@ const Action = struct {
     }
 };
 
-pub fn usage(argv: []u8) !void {
-    const stdout = std.io.getStdOut().writer();
+pub fn usage(allocator: std.mem.Allocator, io: std.Io, argv: [:0]const u8) !void {
+    const buffer: []u8 = std.fmt.allocPrint(
+        allocator,
+        "\\ .\\{s} C:\\windows\\system32\\WindowsPowerShell\\v1.0\\powershell.exe\x00",
+        .{argv},
+    ) catch undefined;
 
-    try stdout.print(
-        \\ .\\{s} C:\windows\system32\WindowsPowerShell\v1.0\powershell.exe
-    , .{
-        argv,
-    });
+    std.Io.File.stdout().writeStreamingAll(io, buffer) catch undefined;
 
-    std.posix.exit(0);
+    std.process.exit(0);
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+pub fn main(init: std.process.Init) !void {
+    var gpa = std.heap.DebugAllocator(.{}){};
     const allocator = gpa.allocator();
     defer _ = gpa.deinit();
 
@@ -200,15 +200,20 @@ pub fn main() !void {
         return;
     }
 
-    // Parse args into string array (error union needs 'try')
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     if (args.len != 2) {
-        try usage(args[0]);
+        try usage(
+            allocator,
+            init.io,
+            args[0],
+        );
     }
 
-    var action = try Action.init(allocator);
+    var action = try Action.init(
+        allocator,
+        init.io,
+    );
     defer action.deinit();
 
     var i: u8 = 0;
@@ -234,5 +239,5 @@ pub fn main() !void {
 
     std.log.info("[+] Executed {s}", .{action.command});
 
-    std.posix.exit(0);
+    std.process.exit(0);
 }
