@@ -29,9 +29,13 @@ const OwnedSid = struct {
 };
 
 pub fn closeHandle(handle: ?win32.HANDLE) void {
-    if (handle != null and handle.? != win32.INVALID_HANDLE_VALUE) {
-        // https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-closehandle
-        _ = win32.CloseHandle(handle.?);
+    std.debug.dumpCurrentStackTrace(.{});
+
+    if (handle) |h| {
+        if (h != win32.INVALID_HANDLE_VALUE) {
+            // https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-closehandle
+            _ = win32.CloseHandle(h);
+        }
     }
 }
 
@@ -243,7 +247,7 @@ pub fn InstallService(
     lpBinaryPathName: ?[*:0]const u8,
 ) void {
     // Get a handle to the SCM database.
-    const schSCManager: ?win32.SC_HANDLE = win32.OpenSCManager(null, // local computer
+    const schSCManager: ?win32.SC_HANDLE = win32.OpenSCManagerA(null, // local computer
         null, // ServicesActive database
         win32.SC_MANAGER_ALL_ACCESS); // full access rights
 
@@ -273,5 +277,5 @@ pub fn InstallService(
         return;
     }
 
-    defer _ = win32.CloseServiceHandle(schService);
+    defer _ = win32.CloseServiceHandle(schService.?);
 }

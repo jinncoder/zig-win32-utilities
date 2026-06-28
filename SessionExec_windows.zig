@@ -9,6 +9,8 @@ const std = @import("std");
 const win32 = @import("win32").everything;
 const windows = std.os.windows;
 
+const panic = std.debug.FullPanic(std.debug.defaultPanic);
+
 const Action = struct {
     const Self = @This();
 
@@ -17,13 +19,15 @@ const Action = struct {
     };
 
     allocator: std.mem.Allocator,
+    io: std.Io,
     sessionID: i32,
     command: [:0]u8,
     silent: bool,
 
-    pub fn init(allocator: std.mem.Allocator) !Self {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) !Self {
         return Self{
             .allocator = allocator,
+            .io = io,
             .sessionID = undefined,
             .command = undefined,
             .silent = false,
@@ -92,22 +96,22 @@ const Action = struct {
     fn executeCommandInSession(self: *Self, sessionId: u32) !void {
         std.log.debug("[+] Attempting execution of command: {s}\n\tUsing Session ID: {d}\n", .{ self.command, sessionId });
 
-        // https://learn.microsoft.com/en-us/windows/win32/api/wtsapi32/nf-wtsapi32-wtsqueryusertoken
-
         var phToken: ?win32.HANDLE = null;
+
+        // https://learn.microsoft.com/en-us/windows/win32/api/wtsapi32/nf-wtsapi32-wtsqueryusertoken
         if (0 == win32.WTSQueryUserToken(sessionId, &phToken)) {
             std.log.err("ExecuteCommandInSession: WTSQueryUserToken: {d}\n", .{@intFromEnum(win32.GetLastError())});
             return Error.UnknownError;
         }
-        defer utility.closeHandle(phToken);
+        // defer utility.closeHandle(phToken);
 
         var lpProcessAttributes: win32.SECURITY_ATTRIBUTES = std.mem.zeroes(win32.SECURITY_ATTRIBUTES);
         lpProcessAttributes.nLength = @sizeOf(win32.SECURITY_ATTRIBUTES);
-        lpProcessAttributes.bInheritHandle = windows.TRUE;
+        lpProcessAttributes.bInheritHandle = win32.TRUE;
 
         var lpThreadAttributes: win32.SECURITY_ATTRIBUTES = std.mem.zeroes(win32.SECURITY_ATTRIBUTES);
         lpThreadAttributes.nLength = @sizeOf(win32.SECURITY_ATTRIBUTES);
-        lpThreadAttributes.bInheritHandle = windows.TRUE;
+        lpThreadAttributes.bInheritHandle = win32.TRUE;
 
         var stdinReadPipe: ?win32.HANDLE = null;
         var stdinWritePipe: ?win32.HANDLE = null;
@@ -122,7 +126,7 @@ const Action = struct {
             std.log.err("ExecuteCommandInSession: CreatePipe (stdout): {d}\n", .{@intFromEnum(win32.GetLastError())});
             return Error.UnknownError;
         }
-        _ = win32.SetHandleInformation(stdinWritePipe, @bitCast(win32.HANDLE_FLAG_INHERIT), .{});
+        _ = win32.SetHandleInformation(stdinWritePipe, @bitCast(win32.HANDLE_FLAG_INHERIT), .{ .INHERIT = 0 });
 
         var stdoutReadPipe: ?win32.HANDLE = null;
         var stdoutWritePipe: ?win32.HANDLE = null;
@@ -137,8 +141,8 @@ const Action = struct {
             std.log.err("ExecuteCommandInSession: CreatePipe (stdout): {d}\n", .{@intFromEnum(win32.GetLastError())});
             return Error.UnknownError;
         }
-        defer utility.closeHandle(stdoutReadPipe);
-        _ = win32.SetHandleInformation(stdoutReadPipe, @bitCast(win32.HANDLE_FLAG_INHERIT), .{});
+        // defer utility.closeHandle(stdoutReadPipe);
+        _ = win32.SetHandleInformation(stdoutReadPipe, @bitCast(win32.HANDLE_FLAG_INHERIT), .{ .INHERIT = 0 });
 
         var stderrReadPipe: ?win32.HANDLE = null;
         var stderrWritePipe: ?win32.HANDLE = null;
@@ -153,8 +157,8 @@ const Action = struct {
             std.log.err("ExecuteCommandInSession: CreatePipe (stderr): {d}\n", .{@intFromEnum(win32.GetLastError())});
             return Error.UnknownError;
         }
-        defer utility.closeHandle(stderrReadPipe);
-        _ = win32.SetHandleInformation(stderrReadPipe, @bitCast(win32.HANDLE_FLAG_INHERIT), .{});
+        // defer utility.closeHandle(stderrReadPipe);
+        _ = win32.SetHandleInformation(stderrReadPipe, @bitCast(win32.HANDLE_FLAG_INHERIT), .{ .INHERIT = 1 });
 
         var si: win32.STARTUPINFOW = std.mem.zeroes(win32.STARTUPINFOW);
         si.cb = @sizeOf(win32.STARTUPINFOW);
@@ -171,7 +175,7 @@ const Action = struct {
         defer self.allocator.free(commandLine);
 
         const lpCommandLine = std.unicode.utf8ToUtf16LeAllocZ(self.allocator, commandLine) catch undefined;
-        errdefer self.allocator.free(lpCommandLine);
+        defer self.allocator.free(lpCommandLine);
 
         if (0 == win32.ImpersonateLoggedOnUser(phToken)) {
             std.log.err("[!] ImpersonateLoggedOnUser failed", .{});
@@ -184,7 +188,7 @@ const Action = struct {
             @constCast(lpCommandLine.ptr),
             &lpProcessAttributes,
             &lpThreadAttributes,
-            windows.TRUE,
+            win32.TRUE,
             if (self.silent) @bitCast(win32.CREATE_NO_WINDOW) else 0,
             @ptrFromInt(0),
             null,
@@ -198,79 +202,73 @@ const Action = struct {
 
         std.log.info("[+] Spawned process in session ID: {d} with PID: {d} executing {s} -Command \"{s}\"", .{ sessionId, pi.dwProcessId, powershell, self.command });
 
-        defer utility.closeHandle(pi.hProcess);
-        defer utility.closeHandle(pi.hThread);
+        // defer utility.closeHandle(pi.hProcess);
+        // defer utility.closeHandle(pi.hThread);
 
         // Close handles to the stdin and stdout pipes no longer needed by the child process.
         // If they are not explicitly closed, there is no way to recognize that the child process has ended.
-        utility.closeHandle(stdinReadPipe);
-        utility.closeHandle(stdinWritePipe);
-        utility.closeHandle(stdoutWritePipe);
-        utility.closeHandle(stderrWritePipe);
-
-        const stdout = std.io.getStdOut().writer();
-        const stderr = std.io.getStdErr().writer();
+        // utility.closeHandle(stdinReadPipe);
+        // utility.closeHandle(stdinWritePipe);
+        // utility.closeHandle(stdoutWritePipe);
+        // utility.closeHandle(stderrWritePipe);
 
         const waiting: bool = if (self.silent) false else true;
 
         if (waiting) {
             std.log.info("[+] Waiting for output from PID: {d}\n\n", .{pi.dwProcessId});
+            const stdout = std.Io.File.stdout();
+            const stderr = std.Io.File.stderr();
+
+            while (waiting) {
+                var lpBuffer: [4096]u8 = undefined;
+                var bytesRead: u32 = 0;
+                var totalBytesAvail: u32 = 0;
+
+                // Use PeekNamedPipe to check for stdout data without blocking
+                if (win32.PeekNamedPipe(stdoutReadPipe, null, 0, null, &totalBytesAvail, null) != 0 and totalBytesAvail > 0) {
+                    if (win32.ReadFile(stdoutReadPipe, &lpBuffer, @min(lpBuffer.len, totalBytesAvail), &bytesRead, null) != 0 and bytesRead > 0) {
+                        try stdout.writeStreamingAll(self.io, lpBuffer[0..bytesRead]);
+                    }
+                }
+
+                // Use PeekNamedPipe to check for stderr data without blocking
+                if (win32.PeekNamedPipe(stderrReadPipe, null, 0, null, &totalBytesAvail, null) != 0 and totalBytesAvail > 0) {
+                    if (win32.ReadFile(stderrReadPipe, &lpBuffer, @min(lpBuffer.len, totalBytesAvail), &bytesRead, null) != 0 and bytesRead > 0) {
+                        try stderr.writeStreamingAll(self.io, lpBuffer[0..bytesRead]);
+                    }
+                }
+
+                // Check if process completed
+                const ret = win32.WaitForSingleObject(pi.hProcess, 100);
+                if (ret != win32.WAIT_TIMEOUT or ret == win32.WAIT_OBJECT_0) {
+                    // Final flush of remaining pipe data after exit
+                    while (win32.PeekNamedPipe(stdoutReadPipe, null, 0, null, &totalBytesAvail, null) != 0 and totalBytesAvail > 0) {
+                        if (win32.ReadFile(stdoutReadPipe, &lpBuffer, @min(lpBuffer.len, totalBytesAvail), &bytesRead, null) != 0) {
+                            try stdout.writeStreamingAll(self.io, lpBuffer[0..bytesRead]);
+                        }
+                    }
+                    while (win32.PeekNamedPipe(stderrReadPipe, null, 0, null, &totalBytesAvail, null) != 0 and totalBytesAvail > 0) {
+                        if (win32.ReadFile(stderrReadPipe, &lpBuffer, @min(lpBuffer.len, totalBytesAvail), &bytesRead, null) != 0) {
+                            try stderr.writeStreamingAll(self.io, lpBuffer[0..bytesRead]);
+                        }
+                    }
+                    break;
+                }
+            }
         }
-
-        while (waiting) {
-            var lpBuffer: [4096]u8 = std.mem.zeroes([4096]u8);
-            var lpNumberOfBytesRead: u32 = 0;
-
-            // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-readfile
-            _ = win32.ReadFile(
-                stdoutReadPipe,
-                &lpBuffer,
-                4096,
-                &lpNumberOfBytesRead,
-                null,
-            );
-
-            if (lpNumberOfBytesRead > 0) {
-                try stdout.print("{s}", .{lpBuffer[0..lpNumberOfBytesRead]});
-            }
-
-            lpBuffer = std.mem.zeroes([4096]u8);
-            lpNumberOfBytesRead = 0;
-
-            // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-readfile
-            _ = win32.ReadFile(
-                stderrReadPipe,
-                &lpBuffer,
-                4096,
-                &lpNumberOfBytesRead,
-                null,
-            );
-
-            if (lpNumberOfBytesRead > 0) {
-                try stderr.print("{s}", .{lpBuffer[0..lpNumberOfBytesRead]});
-            }
-
-            const ret: win32.WIN32_ERROR = @enumFromInt(win32.WaitForSingleObject(pi.hProcess, 100));
-
-            if (ret != win32.WAIT_TIMEOUT or ret == win32.WAIT_OBJECT_0) {
-                break;
-            }
-        }
-
-        try stdout.print("\n\n", .{});
     }
 
     pub fn debug(self: *Self) void {
-        std.log.info("\nExecute {any} in Session ID: {d}\n", .{ self.command, self.sessionID });
+        std.log.info("\nExecute {s} in Session ID: {d}\n", .{ self.command, self.sessionID });
         std.log.info("\n", .{});
     }
 
-    pub fn parseCommand(self: *Self, line: []u8) !void {
+    pub fn parseCommand(self: *Self, line: [:0]const u8) !void {
         self.command = try std.fmt.allocPrintSentinel(self.allocator, "{s}", .{line}, 0);
         errdefer self.allocator.free(self.command);
     }
 
-    pub fn parseSessionID(self: *Self, line: []u8) !void {
+    pub fn parseSessionID(self: *Self, line: [:0]const u8) !void {
         self.sessionID = std.fmt.parseInt(i32, line, 10) catch undefined;
     }
 
@@ -279,10 +277,12 @@ const Action = struct {
     }
 };
 
-pub fn usage(argv: []u8) !void {
-    const stdout = std.io.getStdOut().writer();
-
-    try stdout.print(
+pub fn usage(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    argv: [:0]const u8,
+) !void {
+    const buffer: []u8 = try std.fmt.allocPrint(allocator,
         \\  This tool exist thanks to https://github.com/Leo4j/SessionExec/blob/main/SessionExec.cs
         \\
         \\Example:
@@ -295,23 +295,23 @@ pub fn usage(argv: []u8) !void {
         \\
     , .{ argv, argv });
 
-    std.posix.exit(0);
+    try std.Io.File.stdout().writeStreamingAll(io, buffer);
+
+    std.process.exit(0);
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+pub fn main(init: std.process.Init) !void {
+    var gpa = std.heap.DebugAllocator(.{}){};
     const allocator = gpa.allocator();
     defer _ = gpa.deinit();
 
-    // Parse args into string array (error union needs 'try')
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     if (args.len < 3) {
-        try usage(args[0]);
+        try usage(allocator, init.io, args[0]);
     }
 
-    var action = try Action.init(allocator);
+    var action = try Action.init(allocator, init.io);
     defer action.deinit();
 
     var i: u8 = 0;
@@ -338,5 +338,5 @@ pub fn main() !void {
 
     std.log.info("\n\n[+] Done", .{});
 
-    std.posix.exit(0);
+    std.process.exit(0);
 }

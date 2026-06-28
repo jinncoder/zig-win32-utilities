@@ -24,6 +24,7 @@ const Action = struct {
 
     privilege: std.AutoHashMap(u32, u32),
     enable: bool,
+    show: bool,
     allocator: std.mem.Allocator,
     sid: *win32.SID,
     targetPID: u32,
@@ -38,6 +39,7 @@ const Action = struct {
         return Self{
             .privilege = std.AutoHashMap(u32, u32).init(allocator),
             .enable = true,
+            .show = false,
             .allocator = allocator,
             .sid = undefined,
             .targetPID = undefined,
@@ -62,6 +64,7 @@ const Action = struct {
             std.log.err("TakeProcessOwnership: OpenProcess GetLastError: {d}\n", .{@intFromEnum(win32.GetLastError())});
             return Error.UnableToOpenPolicy;
         }
+        defer utility.closeHandle(hProc);
 
         var si: u32 = @bitCast(win32.OWNER_SECURITY_INFORMATION);
         si |= @bitCast(win32.LABEL_SECURITY_INFORMATION);
@@ -75,6 +78,7 @@ const Action = struct {
             std.log.err("\t TakeProcessOwnership.ConvertSidToStringSidA:CopySid failed. GetLastError: {d}\n", .{@intFromEnum(win32.GetLastError())});
             return Error.AccountNotFound;
         }
+        defer _ = win32.LocalFree(@intCast(@intFromPtr(sida)));
         std.log.debug("TakeProcessOwnership.SID: {s}\n", .{sida.?});
 
         // https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-setsecurityinfo
@@ -94,9 +98,7 @@ const Action = struct {
             return Error.AccountNotFound;
         }
 
-        std.log.debug(("[+] takeProcessOwnership: SetSecurityInfo({d})"), .{pid});
-
-        utility.closeHandle(hProc);
+        std.log.debug(("[+] takeProcessOwnership: SetSecurityInfo({d}) dwRes={d} GLE={d}"), .{ pid, dwRes, @intFromEnum(win32.GetLastError()) });
     }
 
     fn grantProcessFullControl(_: std.mem.Allocator, pid: u32, ppSID: win32.PSID) !void {
@@ -113,21 +115,14 @@ const Action = struct {
             0,
             pid,
         );
-        defer _ = utility.closeHandle(hProcess);
 
         if (hProcess == null) {
             std.log.err("[!] Failed OpenProcess :: null handle", .{});
             return Error.AccountNotFound;
         }
+        defer utility.closeHandle(hProcess);
 
         std.log.debug(("[+] grantProcessFullControl: OpenProcess({d})"), .{pid});
-
-        const result = @intFromEnum(win32.GetLastError());
-
-        if (result != 0) {
-            std.log.err("[!] Failed OpenProcess :: error code ({d})", .{result});
-            return Error.AccountNotFound;
-        }
 
         // https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-getsecurityinfo
         const dwRes = win32.GetSecurityInfo(
@@ -145,25 +140,20 @@ const Action = struct {
             std.log.err("[!] Failed GetSecurityInfo :: error code ({any})", .{dwRes});
             return Error.AccountNotFound;
         }
+        defer _ = win32.LocalFree(@intCast(@intFromPtr(pSD)));
 
         std.log.debug(("[+] grantProcessFullControl: GetSecurityInfo({d})"), .{pid});
 
-        const pSid: ?*win32.PSID = @constCast(&ppSID);
-        // var sida: ?win32.PSTR = null;
-        // // https://learn.microsoft.com/en-us/windows/win32/api/sddl/nf-sddl-convertsidtostringsida
-        // if (0 == win32.ConvertSidToStringSidA(pSid.?.*, &sida)) {
-        //     std.log.err("\t GrantProcessFullControl.ConvertSidToStringSidA failed. GetLastError: {d}\n", .{@intFromEnum(win32.GetLastError())});
-        //     return Error.AccountNotFound;
-        // }
-        // std.log.debug("GrantProcessFullControl.SID: {s}\n", .{sida.?});
+        var ea: win32.EXPLICIT_ACCESS_W = std.mem.zeroes(win32.EXPLICIT_ACCESS_W);
 
-        var ea: ?win32.EXPLICIT_ACCESS_W = std.mem.zeroes(win32.EXPLICIT_ACCESS_W);
-        ea.?.grfAccessPermissions = @bitCast(win32.PROCESS_ALL_ACCESS);
-        ea.?.grfAccessMode = win32.GRANT_ACCESS;
-        ea.?.grfInheritance = win32.NO_INHERITANCE;
-        ea.?.Trustee.TrusteeForm = win32.TRUSTEE_IS_SID;
-        ea.?.Trustee.TrusteeType = win32.TRUSTEE_IS_USER;
-        ea.?.Trustee.ptstrName = @ptrCast(@alignCast(pSid.?.*));
+        ea.grfAccessPermissions = @bitCast(win32.PROCESS_ALL_ACCESS);
+        ea.grfAccessMode = win32.GRANT_ACCESS;
+        ea.grfInheritance = win32.NO_INHERITANCE;
+
+        ea.Trustee.TrusteeForm = win32.TRUSTEE_IS_SID;
+        ea.Trustee.TrusteeType = win32.TRUSTEE_IS_USER;
+
+        ea.Trustee.ptstrName = @ptrCast(@alignCast(@constCast(ppSID)));
 
         // https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-setentriesinaclw
         var ret = win32.SetEntriesInAclW(
@@ -177,6 +167,7 @@ const Action = struct {
             std.log.err("[!] Failed SetEntriesInAclW :: error code ({any})", .{ret});
             return Error.AccountNotFound;
         }
+        defer _ = win32.LocalFree(@intCast(@intFromPtr(pNewDACL)));
 
         std.log.debug(("[+] grantProcessFullControl: SetEntriesInAclW({d})"), .{pid});
 
@@ -202,7 +193,7 @@ const Action = struct {
     pub fn attemptRelabel(self: *Self) !void {
         // https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getcurrentprocess
         const hProcess: ?win32.HANDLE = win32.GetCurrentProcess();
-        defer _ = utility.closeHandle(hProcess);
+        defer utility.closeHandle(hProcess);
 
         if (hProcess == null) {
             std.log.debug("GetCurrentProcess failed", .{});
@@ -218,6 +209,7 @@ const Action = struct {
         }
 
         var ppSid = try utility.getProcessOwnerSID(self.allocator, self.sourceProcessToken);
+        defer ppSid.deinit(self.allocator);
 
         takeProcessOwnership(self.targetPID, ppSid.sid()) catch |err| {
             std.log.err("Failed takeProcessOwnership {any}\n", .{err});
@@ -225,16 +217,11 @@ const Action = struct {
         };
 
         std.log.debug("TakeProcessOwnership: Successfully took ownership of the process {d}\n", .{self.targetPID});
-        ppSid.deinit(self.allocator);
-
-        ppSid = try utility.getProcessOwnerSID(self.allocator, self.sourceProcessToken);
 
         grantProcessFullControl(self.allocator, self.targetPID, ppSid.sid()) catch |err| {
             std.log.err("attemptRelabel: Failed grantProcessFullControl {any}\n", .{err});
             return Action.Error.NoMemory;
         };
-
-        ppSid.deinit(self.allocator);
 
         std.log.debug("Successfully took full control of the process {d}\n", .{self.targetPID});
     }
@@ -369,9 +356,102 @@ const Action = struct {
         defer utility.closeHandle(processInformation.hThread);
     }
 
+    fn showProcessSecurity(pid: u32) !void {
+        var pSD: ?win32.PSECURITY_DESCRIPTOR = null;
+        var pOwnerSid: ?win32.PSID = null;
+        var pDacl: ?*win32.ACL = null;
+
+        var da: u32 = @bitCast(win32.PROCESS_QUERY_INFORMATION);
+        da |= @bitCast(win32.PROCESS_READ_CONTROL);
+
+        const hProcess = win32.OpenProcess(@bitCast(da), 0, pid);
+        if (hProcess == null) {
+            std.log.err("[!] showProcessSecurity: OpenProcess failed GLE: {d}", .{@intFromEnum(win32.GetLastError())});
+            return Error.UnableToOpenPolicy;
+        }
+        defer utility.closeHandle(hProcess);
+
+        // https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-getsecurityinfo
+        const dwRes = win32.GetSecurityInfo(
+            hProcess.?,
+            win32.SE_KERNEL_OBJECT,
+            @bitCast(win32.OBJECT_SECURITY_INFORMATION{
+                .OWNER_SECURITY_INFORMATION = 1,
+                .DACL_SECURITY_INFORMATION = 1,
+                .LABEL_SECURITY_INFORMATION = 1,
+            }),
+            &pOwnerSid,
+            null,
+            &pDacl,
+            null,
+            &pSD,
+        );
+        if (dwRes != win32.ERROR_SUCCESS) {
+            std.log.err("[!] showProcessSecurity: GetSecurityInfo failed GLE: {d}", .{@intFromEnum(win32.GetLastError())});
+            return Error.AccountNotFound;
+        }
+        defer _ = win32.LocalFree(@intCast(@intFromPtr(pSD)));
+
+        var ownerStr: ?win32.PSTR = null;
+        if (0 != win32.ConvertSidToStringSidA(pOwnerSid, &ownerStr)) {
+            defer _ = win32.LocalFree(@intCast(@intFromPtr(ownerStr)));
+            std.log.info("[+] PID {d} Owner SID : {s}", .{ pid, ownerStr.? });
+        } else {
+            std.log.err("[!] ConvertSidToStringSidA failed GLE: {d}", .{@intFromEnum(win32.GetLastError())});
+        }
+
+        var sddlStr: ?win32.PSTR = null;
+        var sddlLen: u32 = 0;
+        if (0 != win32.ConvertSecurityDescriptorToStringSecurityDescriptorA(
+            pSD.?,
+            win32.SDDL_REVISION_1,
+            @bitCast(win32.OBJECT_SECURITY_INFORMATION{
+                .OWNER_SECURITY_INFORMATION = 1,
+                .DACL_SECURITY_INFORMATION = 1,
+                .LABEL_SECURITY_INFORMATION = 1,
+            }),
+            &sddlStr,
+            &sddlLen,
+        )) {
+            defer _ = win32.LocalFree(@intCast(@intFromPtr(sddlStr)));
+            std.log.info("[+] PID {d} SDDL      : {s}", .{ pid, sddlStr.? });
+        } else {
+            std.log.err("[!] ConvertSecurityDescriptorToStringSecurityDescriptorA failed GLE: {d}", .{@intFromEnum(win32.GetLastError())});
+        }
+
+        if (pDacl) |dacl| {
+            var aclInfo: win32.ACL_SIZE_INFORMATION = std.mem.zeroes(win32.ACL_SIZE_INFORMATION);
+            if (0 != win32.GetAclInformation(
+                dacl,
+                &aclInfo,
+                @sizeOf(win32.ACL_SIZE_INFORMATION),
+                win32.AclSizeInformation,
+            )) {
+                std.log.info("[+] PID {d} DACL ACE count: {d}", .{ pid, aclInfo.AceCount });
+                var i: u32 = 0;
+                while (i < aclInfo.AceCount) : (i += 1) {
+                    var pAce: ?*anyopaque = null;
+                    if (0 != win32.GetAce(dacl, i, &pAce)) {
+                        const header: *win32.ACE_HEADER = @ptrCast(@alignCast(pAce.?));
+
+                        if (header.AceType == 0) {
+                            const ace: *win32.ACCESS_ALLOWED_ACE = @ptrCast(@alignCast(pAce.?));
+                            var aceStr: ?win32.PSTR = null;
+                            if (0 != win32.ConvertSidToStringSidA(@ptrCast(&ace.SidStart), &aceStr)) {
+                                defer _ = win32.LocalFree(@intCast(@intFromPtr(aceStr)));
+                                std.log.info("    ACE[{d}] ALLOW mask=0x{x:0>8} SID={s}", .{ i, ace.Mask, aceStr.? });
+                            }
+                        } else {
+                            std.log.info("    ACE[{d}] type={d} (not ACCESS_ALLOWED)", .{ i, header.AceType });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     pub fn debug(self: *Self) void {
-        std.log.info("\nRelabel Targets PID: {d}\n", .{self.targetPID});
-        std.log.info("\n", .{});
+        std.log.info("Relabel Targets PID: {d}", .{self.targetPID});
     }
 
     pub fn parseUsername(self: *Self, line: [:0]const u8) !void {
@@ -387,6 +467,7 @@ const Action = struct {
         defer self.allocator.free(self.lpAccountName);
     }
 };
+
 pub fn usage(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -400,10 +481,13 @@ pub fn usage(
         \\ Attempt to set ownership of PID for the user 'pete':
         \\ .\\{s} pete 1969
         \\
+        \\ Attempt to show ownership of PID:
+        \\ .\\{s} -show 1969
+        \\
         \\ Show this menu
         \\ .\\{s} -h
         \\
-    , .{ argv, argv });
+    , .{ argv, argv, argv });
 
     try std.Io.File.stdout().writeStreamingAll(io, buffer);
 
@@ -427,6 +511,10 @@ pub fn main(init: std.process.Init) !void {
     var i: u8 = 0;
 
     for (args) |arg| {
+        if (std.mem.containsAtLeast(u8, arg, 1, "-show")) {
+            action.show = true;
+        }
+
         if (i == 1) {
             try action.parseUsername(arg);
         }
@@ -440,7 +528,11 @@ pub fn main(init: std.process.Init) !void {
 
     action.debug();
 
-    try action.attemptRelabel();
+    if (action.show) {
+        try Action.showProcessSecurity(action.targetPID);
+    } else {
+        try action.attemptRelabel();
+    }
 
     // try action.spawnProcessFromPID();
 

@@ -35,14 +35,13 @@ pub fn build(b: *std.Build) !void {
         "PasswordFilter_windows_shared.zig",
         "ReflectDLL_windows.zig",
         "RelabelAbuse_windows.zig",
-        //        "ServiceAddUser_windows.zig",
-        //        "SessionExec_windows.zig",
-        //        "shellcode_windows.zig",
-        //        "RemoteShellcode_windows_shared.zig",
-        //        "Shortcut_windows.zig",
-        //        "Wallpaper_windows.zig",
-
-        //        "shellcode_linux.zig",
+        "RemoteShellcode_windows_shared.zig",
+        "ServiceAddUser_windows.zig",
+        "SessionExec_windows.zig",
+        "shellcode_windows.zig",
+        "Shortcut_windows.zig",
+        "Wallpaper_windows.zig",
+        "shellcode_linux.zig",
     };
 
     const optimize = b.standardOptimizeOption(.{});

