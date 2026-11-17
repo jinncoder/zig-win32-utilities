@@ -85,11 +85,11 @@ Provided a quick utility to create shortcuts from the command line.
 ## Get and Build
 
 ```bash
-git clone git@github.com:ArchiMoebius/zig-win32-utilities.git --recurse-submodules
+git clone git@github.com:jinncoder/zig-win32-utilities.git --recurse-submodules
 
 # - OR -
 
-git clone https://github.com/ArchiMoebius/zig-win32-utilities.git --recurse-submodules
+git clone https://github.com/jinncoder/zig-win32-utilities.git --recurse-submodules
 ```
 
 ### Setup Zig
